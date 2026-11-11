@@ -2,143 +2,97 @@
 
 ## 日本語
 
-Radio Goshuincho（電波御朱印帳）は、旅先で観測した電波の特徴から、その場所と日時だけのモノクロ印章を作るFlipper Zero向け外部アプリです。本リポジトリのPhase Aは、実際のSub-GHz受信の代わりに再現可能なダミーRSSI列を使用します。
+Radio Goshuincho（電波御朱印帳）は、Flipper Zero内蔵Sub-GHz受信機で観測したRSSI（受信信号強度）から、場所と日時に結び付いた128×64モノクロ印章を作る外部アプリです。Phase B v0.2.0は受信専用です。送信APIや信号源を特定する機能は実装していません。
 
-### Phase Aでできること
+### Phase Bの機能
 
-- 128×64モノクロ画面向けのメインメニュー
-- 英数字・空白・ハイフンによる場所名入力
-- 場所名とRTC日時から16点のダミーRSSI測定値を生成
-- 場所・日時・測定値から決定的な128×64印章を生成
-- 印章、場所、日時、測定情報をmicroSDへ保存
-- 保存済み印章の一覧表示と再閲覧
-- バージョン、ペイロード長、CRC32を持つ拡張可能な保存形式
+- `Real RF`: 433.92 MHzを10秒間、200 ms間隔で50回観測
+- 周波数、現在RSSI、経過時間、進捗、簡易グラフの表示
+- Backによる安全な中断と、失敗時の明示（Demoへの自動切替なし）
+- `Demo`: Phase Aと同様の決定的なダミーRSSI
+- 場所、RTC日時、RSSI列、統計、周波数、測定種別から決定的な印章を生成
+- CRC32付きmicroSD保存、一覧、再表示
+- Phase A形式version 1の`.rgs`を読込み、新規データはversion 2で保存
+- 同名レコードには連番を付け、既存ファイルを上書きしない
 
-Phase Aは送受信を行いません。Phase BでSub-GHz受信を追加する予定ですが、送信機能は将来も実装しません。
-
-### 必要なもの
-
-- Flipper Zero公式ファームウェア Release版
-- Python 3.8以上
-- Flipper Devices公式 [uFBT](https://github.com/flipperdevices/flipperzero-ufbt)
-- Flipper Zero本体で保存機能を使う場合はmicroSD
+RSSIは受信帯域内の総合的な強度指標です。特定送信機の存在・識別、通信内容、または電波が存在しないことを判定するものではありません。
 
 ### ビルド
 
+公式Releaseファームウェア、Python 3.8以上、公式[uFBT](https://github.com/flipperdevices/flipperzero-ufbt)、保存用microSDが必要です。
+
 ```sh
+python3 -m venv .venv-ufbt
+. .venv-ufbt/bin/activate
 python3 -m pip install --upgrade ufbt
 ufbt update --channel=release
 ufbt
+tests/run_host_tests.sh
 ```
 
-成功すると `dist/radio_goshuincho.fap` が生成されます。
-
-### 実機への転送
-
-USB接続したFlipper ZeroへuFBTで転送・起動する場合:
-
-```sh
-ufbt launch
-```
-
-またはqFlipperやmicroSDカードリーダーを使い、FAPをmicroSDの `apps/Tools/` にコピーしてください。FAPとFlipper本体の公式ファームウェアRelease世代を合わせてください。
-
-保存データはアプリ専用領域 `/ext/apps_data/radio_goshuincho/` に `.rgs` ファイルとして格納されます。読み込み時にはサイズ、形式バージョン、CRC32を検証し、不完全なレコードを表示しません。
+FAPは`dist/radio_goshuincho.fap`に生成されます。USBなら`ufbt launch`、qFlipperならmicroSDの`/ext/apps/Tools/radio_goshuincho.fap`へコピーします。本体とSDKのRelease世代を合わせてください。
 
 ### 操作
 
-1. `Create Stamp` を選びます。
-2. 場所名を入力して確定します。
-3. 印章が生成され、microSDへ保存されます。
-4. `OK` または左右キーで印章と測定情報を切り替えます。
-5. `Saved Stamps` から以前の印章を再閲覧できます。
+1. `Real RF`または`Demo`を選び、英数字・空白・ハイフンで場所名を入力します。
+2. Real RFでは10秒待ちます。Backで中断できます。完了後に`Create`を押すと生成・保存します。
+3. Demoでは確定直後に生成・保存します。
+4. 情報画面の`Seal`（OK）で印章と情報を切り替えます。
+5. `Saved Stamps`では`R`（Real RF）/`D`（Demo）付き一覧から再表示します。
 
-### 実機確認手順（Phase A v0.1.4）
+保存先は`/ext/apps_data/radio_goshuincho/`です。
 
-以下は公式ファームウェアRelease 1.5.1とmicroSDを装着したFlipper Zeroで確認した手順です。
+### Phase B実機テスト手順（未実施）
 
-1. `ufbt` で生成した `dist/radio_goshuincho.fap` をPCへ用意します。
-2. Flipper ZeroをUSB接続し、qFlipperのFile Managerを開きます。
-3. 古い版がある場合は削除し、FAPをmicroSDの `/ext/apps/Tools/radio_goshuincho.fap` へコピーします。
-4. 本体の `Applications` → `Tools` → `Radio Goshuincho` を起動します。
-5. `About` を開き、`Version 0.1.4 / microSD` と表示されることを確認します。
-6. `Create Stamp` を選択し、英数字の場所名を入力して `Save` を押します。
-7. 情報画面に `Dummy RSSI / Saved` と表示されることを確認します。この時点で保存は完了しています。
-8. `Seal` を押し、128×64の印章が描画されることを確認します。
-9. `Back` で戻り、`Saved Stamps` に日時と場所名が表示されることを確認します。
-10. 保存項目を開き、情報と印章を再表示できることを確認します。
+このクラウド環境にはFlipper Zeroが接続されていないため、以下は実機で行う必要があります。
 
-保存ファイルは `/ext/apps_data/radio_goshuincho/` にあります。qFlipperから `.rgs` ファイルをバックアップできます。実機で問題が起きた場合は、ファームウェアとFAPのRelease世代が一致していること、microSDが認識されていること、`About` に期待するアプリバージョンが表示されることを確認してください。
+1. 公式Releaseファームウェアの本体とmicroSDへv0.2.0を導入し、`About`の`RX only`と版を確認します。
+2. Demoの生成・保存・一覧・再表示を確認します。
+3. Phase A v0.1.4の`.rgs`を残し、`Saved Stamps`から開けることを確認します。
+4. Real RFで433.92 MHz、RSSI、時間、グラフ、進捗が更新されることを確認します。
+5. 測定中にBackを押し、取消表示後に戻れることと、他のSub-GHzアプリが使えることを確認します。
+6. Real RFを完了し、`Create`後に50 samples、印章、保存一覧を確認します。
+7. microSD未装着/書込み不能でエラー表示を確認します。
+8. `.rgs`を1 byte変更し、破損レコードが一覧から除外されることを確認します。
+9. 無線リソースを利用できない状況でエラーになり、Demoへ自動移行しないことを確認します。
 
 ## English
 
-Radio Goshuincho is a Flipper Zero external app that turns observed radio characteristics into a unique monochrome travel stamp tied to a place and time. Phase A uses a reproducible dummy RSSI sequence instead of the real Sub-GHz receiver.
+Radio Goshuincho turns RSSI observations from Flipper Zero's built-in Sub-GHz receiver into a deterministic 128×64 travel seal tied to a place and time. Phase B v0.2.0 is receive-only: it has no transmit API calls and does not identify signal sources.
 
-### Phase A features
+### Phase B features
 
-- Main menu designed for the 128×64 monochrome display
-- Place-name input using letters, digits, spaces, and hyphens
-- Sixteen deterministic dummy RSSI samples derived from place and RTC time
-- Reproducible 128×64 seal generation from place, time, and measurements
-- microSD persistence for the seal and all source metadata
-- Saved-stamp list and viewer
-- Extensible file envelope with a version, payload length, and CRC32
+- `Real RF`: observe 433.92 MHz for 10 seconds at 200 ms intervals (50 samples)
+- Live frequency, RSSI, elapsed time, progress, and compact graph
+- Safe Back cancellation and explicit errors; no silent Demo fallback
+- Deterministic `Demo` mode, seal generation, and CRC32-protected microSD persistence
+- Phase A version 1 `.rgs` compatibility; new extended version 2 records
+- Collision suffixes prevent overwriting existing records
 
-Phase A does not transmit or receive radio signals. Phase B may add Sub-GHz reception. Transmission will never be implemented.
+RSSI is an aggregate strength indication in the receiver bandwidth. It cannot prove the identity or presence of a transmitter, reveal content, or establish that no radio energy exists.
 
-### Requirements
+### Build and install
 
-- Official Flipper Zero firmware, Release channel
-- Python 3.8 or newer
-- Official Flipper Devices [uFBT](https://github.com/flipperdevices/flipperzero-ufbt)
-- A microSD card for persistence on the device
-
-### Build
+Use official Release firmware, Python 3.8+, official uFBT, and a microSD card:
 
 ```sh
+python3 -m venv .venv-ufbt
+. .venv-ufbt/bin/activate
 python3 -m pip install --upgrade ufbt
 ufbt update --channel=release
 ufbt
+tests/run_host_tests.sh
 ```
 
-The output is `dist/radio_goshuincho.fap`.
-
-### Install on a device
-
-With a Flipper Zero connected over USB, build, copy, and launch with:
-
-```sh
-ufbt launch
-```
-
-Alternatively, use qFlipper or a microSD reader and copy the FAP to `apps/Tools/` on the card. Keep the FAP SDK release aligned with the official firmware release installed on the device.
-
-Stamp records are stored as `.rgs` files in `/ext/apps_data/radio_goshuincho/`. The reader validates the size, format version, and CRC32 and rejects incomplete records.
+The output is `dist/radio_goshuincho.fap`. Install with `ufbt launch`, or copy it with qFlipper to `/ext/apps/Tools/radio_goshuincho.fap`. Match the device firmware and SDK Release generation. Records live in `/ext/apps_data/radio_goshuincho/`.
 
 ### Controls
 
-1. Select `Create Stamp`.
-2. Enter and confirm a place name.
-3. The app generates and saves the stamp to microSD.
-4. Press `OK`, Left, or Right to switch between the seal and its metadata.
-5. Open `Saved Stamps` to revisit previous seals.
+Choose `Real RF` or `Demo` and enter a place. Real RF runs for ten seconds and can be cancelled with Back; press `Create` after completion. Demo generates immediately. Use `Seal`/OK to toggle the seal, and `Saved Stamps` to reopen `R` (real) or `D` (demo) records.
 
-### On-device verification (Phase A v0.1.4)
+### Phase B device tests (not yet run)
 
-The following procedure was verified on a Flipper Zero with a microSD card and official firmware Release 1.5.1.
-
-1. Build `dist/radio_goshuincho.fap` with `ufbt` and make the file available on the PC.
-2. Connect the Flipper Zero over USB and open qFlipper's File Manager.
-3. Remove any older build, then copy the FAP to `/ext/apps/Tools/radio_goshuincho.fap` on the microSD card.
-4. On the device, open `Applications` → `Tools` → `Radio Goshuincho`.
-5. Open `About` and confirm that it shows `Version 0.1.4 / microSD`.
-6. Select `Create Stamp`, enter an alphanumeric place name, and press `Save`.
-7. Confirm that the information screen shows `Dummy RSSI / Saved`. Persistence is complete at this point.
-8. Press `Seal` and confirm that the 128×64 seal is rendered.
-9. Press `Back`, then confirm that `Saved Stamps` lists the timestamp and place name.
-10. Open the saved item and confirm that its metadata and seal can be displayed again.
-
-Records are stored in `/ext/apps_data/radio_goshuincho/` and can be backed up through qFlipper. If device verification fails, confirm that the firmware and FAP target the same Release generation, the microSD card is mounted, and `About` shows the expected app version.
+No Flipper Zero is attached to this cloud environment. On matching official Release firmware, verify About/version, Demo save/reload, Phase A record loading, live Real RF progress, Back cancellation and later use by another Sub-GHz app, completed 50-sample save, microSD failures, corrupted-record rejection, and explicit radio-resource failure without Demo fallback.
 
 ## License
 
