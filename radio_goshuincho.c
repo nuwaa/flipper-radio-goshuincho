@@ -107,6 +107,7 @@ typedef struct {
     size_t pending_saved_index;
     GoshuinStampPayload working_stamp;
     DateTime measurement_datetime;
+    uint32_t measurement_frequency_hz;
     const SubGhzDevice* radio;
     bool devices_initialized;
     bool radio_begun;
@@ -256,7 +257,7 @@ static void display_draw(Canvas* canvas, void* context) {
         canvas_draw_str(canvas, 3, 22, "Phase B - RX only");
         canvas_draw_str(canvas, 3, 32, "Real RF + Demo RSSI");
         canvas_draw_str(canvas, 3, 42, "No Sub-GHz TX capability");
-        canvas_draw_str(canvas, 3, 52, "Version 0.2.0 / microSD");
+        canvas_draw_str(canvas, 3, 52, "Version 0.2.1 / microSD");
         elements_button_left(canvas, "Back");
         return;
     }
@@ -298,12 +299,13 @@ static void display_draw(Canvas* canvas, void* context) {
         model->stamp.rssi_max);
     canvas_draw_str(canvas, 2, 42, line);
     if(model->stamp.measurement_source == GoshuinMeasurementSubGhzReceive) {
+        const uint32_t frequency_hundredths = (model->stamp.frequency_hz + 5000UL) / 10000UL;
         snprintf(
             line,
             sizeof(line),
             "Real %lu.%02luMHz / %u",
-            (unsigned long)(model->stamp.frequency_hz / 1000000UL),
-            (unsigned long)((model->stamp.frequency_hz / 10000UL) % 100UL),
+            (unsigned long)(frequency_hundredths / 100UL),
+            (unsigned long)(frequency_hundredths % 100UL),
             model->stamp.sample_count);
     } else {
         snprintf(line, sizeof(line), "Demo / %u samples", model->stamp.sample_count);
@@ -379,8 +381,9 @@ static bool radio_start(RadioGoshuinchoApp* app) {
     subghz_devices_reset(app->radio);
     subghz_devices_idle(app->radio);
     subghz_devices_load_preset(app->radio, FuriHalSubGhzPresetOok650Async, NULL);
-    if(subghz_devices_set_frequency(app->radio, GOSHUIN_RF_FREQUENCY_HZ) !=
-       GOSHUIN_RF_FREQUENCY_HZ) {
+    app->measurement_frequency_hz =
+        subghz_devices_set_frequency(app->radio, GOSHUIN_RF_FREQUENCY_HZ);
+    if(!subghz_devices_is_frequency_valid(app->radio, app->measurement_frequency_hz)) {
         return false;
     }
     subghz_devices_flush_rx(app->radio);
@@ -423,7 +426,7 @@ static void measure_finish_and_save(RadioGoshuinchoApp* app) {
            &app->working_stamp,
            app->location,
            &app->measurement_datetime,
-           GOSHUIN_RF_FREQUENCY_HZ,
+           app->measurement_frequency_hz,
            GOSHUIN_RF_INTERVAL_MS,
            samples,
            count)) {

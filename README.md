@@ -2,7 +2,7 @@
 
 ## 日本語
 
-Radio Goshuincho（電波御朱印帳）は、Flipper Zero内蔵Sub-GHz受信機で観測したRSSI（受信信号強度）から、場所と日時に結び付いた128×64モノクロ印章を作る外部アプリです。Phase B v0.2.0は受信専用です。送信APIや信号源を特定する機能は実装していません。
+Radio Goshuincho（電波御朱印帳）は、Flipper Zero内蔵Sub-GHz受信機で観測したRSSI（受信信号強度）から、場所と日時に結び付いた128×64モノクロ印章を作る外部アプリです。Phase B v0.2.1は受信専用です。送信APIや信号源を特定する機能は実装していません。
 
 ### Phase Bの機能
 
@@ -46,7 +46,7 @@ FAPは`dist/radio_goshuincho.fap`に生成されます。USBなら`ufbt launch`�
 
 このクラウド環境にはFlipper Zeroが接続されていないため、以下は実機で行う必要があります。
 
-1. 公式Releaseファームウェアの本体とmicroSDへv0.2.0を導入し、`About`の`RX only`と版を確認します。
+1. 公式Releaseファームウェアの本体とmicroSDへv0.2.1を導入し、`About`の`RX only`と版を確認します。
 2. Demoの生成・保存・一覧・再表示を確認します。
 3. Phase A v0.1.4の`.rgs`を残し、`Saved Stamps`から開けることを確認します。
 4. Real RFで433.92 MHz、RSSI、時間、グラフ、進捗が更新されることを確認します。
@@ -58,7 +58,7 @@ FAPは`dist/radio_goshuincho.fap`に生成されます。USBなら`ufbt launch`�
 
 ## English
 
-Radio Goshuincho turns RSSI observations from Flipper Zero's built-in Sub-GHz receiver into a deterministic 128×64 travel seal tied to a place and time. Phase B v0.2.0 is receive-only: it has no transmit API calls and does not identify signal sources.
+Radio Goshuincho turns RSSI observations from Flipper Zero's built-in Sub-GHz receiver into a deterministic 128×64 travel seal tied to a place and time. Phase B v0.2.1 is receive-only: it has no transmit API calls and does not identify signal sources.
 
 ### Phase B features
 
