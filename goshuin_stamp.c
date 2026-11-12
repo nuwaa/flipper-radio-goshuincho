@@ -1,4 +1,5 @@
 #include "goshuin_stamp.h"
+#include "goshuin_themes.h"
 
 #include <string.h>
 
@@ -142,7 +143,15 @@ static void fill_stamp(
     seed = fnv_update(seed, &stamp->sample_count, 1U);
     seed = fnv_update(seed, stamp->rssi_samples, count);
     stamp->seed = seed ? seed : 0x6D2B79F5UL;
-    generate_seal(stamp);
+    const GoshuinThemeBandInput input = {
+        .samples = stamp->rssi_samples,
+        .sample_count = stamp->sample_count,
+    };
+    const GoshuinThemeId theme = source == GoshuinMeasurementDummy ? GoshuinThemeDemo :
+                                                                     GoshuinTheme433;
+    if(!goshuin_theme_render(theme, &input, 1U, stamp->seed, stamp->seal)) {
+        generate_seal(stamp);
+    }
 }
 
 void goshuin_stamp_create_demo(
