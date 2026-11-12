@@ -1,0 +1,92 @@
+#include "goshuin_themes.h"
+
+#include <stdint.h>
+#include <stdio.h>
+
+static uint8_t reverse_bits(uint8_t value) {
+    value = (uint8_t)(((value & 0x55U) << 1U) | ((value >> 1U) & 0x55U));
+    value = (uint8_t)(((value & 0x33U) << 2U) | ((value >> 2U) & 0x33U));
+    return (uint8_t)((value << 4U) | (value >> 4U));
+}
+
+static int write_pbm(const char* directory, const char* name, const uint8_t* seal) {
+    char path[256];
+    if(snprintf(path, sizeof(path), "%s/%s.pbm", directory, name) >= (int)sizeof(path)) return 1;
+    FILE* file = fopen(path, "wb");
+    if(!file) return 1;
+    if(fprintf(file, "P4\n128 64\n") < 0) {
+        fclose(file);
+        return 1;
+    }
+    for(size_t i = 0; i < GOSHUIN_SEAL_BYTES; ++i) {
+        if(fputc(reverse_bits(seal[i]), file) == EOF) {
+            fclose(file);
+            return 1;
+        }
+    }
+    return fclose(file) != 0;
+}
+
+static int render_preview(
+    const char* directory,
+    const char* name,
+    GoshuinSeasonId season,
+    GoshuinRarityId rarity,
+    const GoshuinThemeBandInput* bands) {
+    uint8_t seal[GOSHUIN_SEAL_BYTES];
+    const uint32_t seed = 0x50483545U + (uint32_t)season * 17U + (uint32_t)rarity;
+    if(!goshuin_theme_render(GoshuinThemeCombined, bands, 5U, seed, seal) ||
+       !goshuin_theme_apply_collectible(seal, season, rarity, seed)) {
+        return 1;
+    }
+    return write_pbm(directory, name, seal);
+}
+
+int main(int argc, char** argv) {
+    if(argc != 2) return 2;
+    static const int8_t samples[5][16] = {
+        {-112, -112, -111, -112, -111, -112, -112, -111, -112, -112, -111, -112, -111, -112, -112, -111},
+        {-100, -100, -100, -64, -100, -100, -100, -100, -100, -100, -100, -62, -100, -100, -100, -100},
+        {-113, -52, -101, -45, -116, -64, -93, -39, -110, -57, -98, -48, -114, -66, -89, -42},
+        {-110, -106, -102, -98, -94, -90, -86, -82, -78, -74, -70, -66, -62, -58, -54, -50},
+        {-50, -54, -58, -62, -66, -70, -74, -78, -82, -86, -90, -94, -98, -102, -106, -110},
+    };
+    GoshuinThemeBandInput bands[5];
+    for(size_t i = 0; i < 5U; ++i) {
+        bands[i].samples = samples[i];
+        bands[i].sample_count = 16U;
+    }
+    static const struct {
+        GoshuinSeasonId id;
+        const char* name;
+    } seasons[] = {
+        {GoshuinSeasonSpring, "season_spring"},
+        {GoshuinSeasonSummer, "season_summer"},
+        {GoshuinSeasonAutumn, "season_autumn"},
+        {GoshuinSeasonWinter, "season_winter"},
+    };
+    for(size_t i = 0; i < sizeof(seasons) / sizeof(seasons[0]); ++i) {
+        if(render_preview(
+               argv[1], seasons[i].name, seasons[i].id, GoshuinRarityStandard, bands)) {
+            return 1;
+        }
+    }
+    static const struct {
+        GoshuinRarityId id;
+        const char* name;
+    } rarities[] = {
+        {GoshuinRarityStandard, "rarity_travel"},
+        {GoshuinRarityQuiet, "rarity_quiet"},
+        {GoshuinRaritySpark, "rarity_spark"},
+        {GoshuinRarityStorm, "rarity_storm"},
+        {GoshuinRarityHarmony, "rarity_harmony"},
+    };
+    for(size_t i = 0; i < sizeof(rarities) / sizeof(rarities[0]); ++i) {
+        if(render_preview(
+               argv[1], rarities[i].name, GoshuinSeasonAutumn, rarities[i].id, bands)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+

@@ -5,7 +5,7 @@ All integers are little-endian. Every file begins with the same packed 16-byte e
 | Offset | Field | Type | Meaning |
 | ---: | --- | --- | --- |
 | 0 | magic | 4 bytes | ASCII `RGSF` |
-| 4 | format_version | `uint16_t` | `1`, `2`, `3`, or `4` |
+| 4 | format_version | `uint16_t` | `1`, `2`, `3`, `4`, or `5` |
 | 6 | header_size | `uint16_t` | Must be `16` |
 | 8 | payload_size | `uint32_t` | Exact payload size for the version |
 | 12 | payload_crc32 | `uint32_t` | IEEE CRC32 of payload |
@@ -87,3 +87,20 @@ Version 3 is frozen. Its original five-graph generator and strict regenerate-and
 Theme IDs are `1` integrated 5 Bands, `2` 315 MHz, `3` 426 MHz, `4` 429 MHz, `5` 433 MHz, and `6` 920 MHz. Demo uses theme ID `0` in the common renderer but is stored in the existing v2 Demo record, not v4.
 
 For the integrated theme, the seed hashes place, timestamp, theme/design versions, and all five band IDs, actual frequencies, and sample arrays. A band-specific theme hashes only its selected band's ID, actual frequency, and samples in addition to the shared metadata. The v4 decoder validates all band metadata and statistics using the frozen v3 rules, recomputes the theme seed and bitmap, and requires an exact match. Reserved bytes must be zero. A v4 write never migrates or overwrites v1/v2/v3 files.
+
+## Version 5 collectible payload
+
+Version 5 is also exactly 1,248 bytes. It preserves all v4 offsets except that bytes 20 and 21 are now meaningful and the design algorithm is version 2:
+
+| Offset | Field | Size |
+| ---: | --- | ---: |
+| 0–19 | RTC, source/status, theme/design, sample/preset and timing fields | 20 |
+| 20 | season_id (`1` spring, `2` summer, `3` autumn, `4` winter) | 1 |
+| 21 | rarity_id (`0` travel, `1` quiet, `2` spark, `3` storm, `4` five harmony) | 1 |
+| 22 | five unchanged 34-byte band records | 170 |
+| 192 | deterministic collectible seed | 4 |
+| 196 | NUL-terminated ASCII place | 25 |
+| 221 | reserved1 (three zero bytes) | 3 |
+| 224 | themed, seasonal 128×64 1bpp bitmap | 1,024 |
+
+`measurement_source` is `4` and `design_algorithm_version` is `2`. Season is derived from the stored month. Rarity is recomputed from the five band-local feature sets; it never ranks absolute RSSI across bands. Both IDs are included in the seed and verified on read. The decoder also applies all v3 band/statistics validation and requires exact regenerated bitmap equality. Versions 1–4 remain immutable and are never migrated.

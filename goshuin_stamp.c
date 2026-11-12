@@ -149,7 +149,13 @@ static void fill_stamp(
     };
     const GoshuinThemeId theme = source == GoshuinMeasurementDummy ? GoshuinThemeDemo :
                                                                      GoshuinTheme433;
-    if(!goshuin_theme_render(theme, &input, 1U, stamp->seed, stamp->seal)) {
+    if(goshuin_theme_render(theme, &input, 1U, stamp->seed, stamp->seal)) {
+        const GoshuinSeasonId season = goshuin_theme_season_from_month(stamp->month);
+        const GoshuinRarityId rarity = goshuin_theme_classify_rarity(&input, 1U);
+        if(!goshuin_theme_apply_collectible(stamp->seal, season, rarity, stamp->seed)) {
+            generate_seal(stamp);
+        }
+    } else {
         generate_seal(stamp);
     }
 }
