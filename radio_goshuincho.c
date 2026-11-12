@@ -100,7 +100,9 @@ typedef struct {
     GoshuinDisplayMode mode;
     bool show_info;
     uint8_t band_page;
+    uint8_t seal_page;
     GoshuinRecord record;
+    uint8_t individual_seal[GOSHUIN_SEAL_BYTES];
     char message[64];
 } GoshuinDisplayModel;
 
@@ -318,7 +320,9 @@ static void display_record(
             model->mode = GoshuinDisplayStamp;
             model->show_info = true;
             model->band_page = 0;
+            model->seal_page = 0;
             model->record = *record;
+            memset(model->individual_seal, 0, sizeof(model->individual_seal));
             model->message[0] = '\0';
         },
         true);
@@ -354,7 +358,7 @@ static void display_draw(Canvas* canvas, void* context) {
         canvas_draw_str(canvas, 3, 22, "Phase C - RX only");
         canvas_draw_str(canvas, 3, 32, "5 Bands + Real + Demo");
         canvas_draw_str(canvas, 3, 42, "No Sub-GHz TX capability");
-        canvas_draw_str(canvas, 3, 52, "Version 0.3.0 / microSD");
+        canvas_draw_str(canvas, 3, 52, "Version 0.3.1 / microSD");
         elements_button_left(canvas, "Back");
         return;
     }
@@ -368,10 +372,28 @@ static void display_draw(Canvas* canvas, void* context) {
     }
 
     const bool multiband = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
-    const uint8_t* seal = multiband ? model->record.payload.multiband.seal :
+    const uint8_t* seal = multiband ? (model->seal_page ? model->individual_seal :
+                                                          model->record.payload.multiband.seal) :
                                       model->record.payload.legacy.seal;
     if(!model->show_info) {
         canvas_draw_xbm(canvas, 0, 0, GOSHUIN_SEAL_WIDTH, GOSHUIN_SEAL_HEIGHT, seal);
+        if(multiband) {
+            char label[8];
+            if(model->seal_page) {
+                snprintf(
+                    label,
+                    sizeof(label),
+                    "%u",
+                    model->record.payload.multiband.bands[model->seal_page - 1U].band_id);
+            } else {
+                strcpy(label, "All");
+            }
+            canvas_set_color(canvas, ColorWhite);
+            canvas_draw_box(canvas, 1, 1, 25, 10);
+            canvas_set_color(canvas, ColorBlack);
+            canvas_set_font(canvas, FontSecondary);
+            canvas_draw_str(canvas, 3, 9, label);
+        }
         return;
     }
 
@@ -481,13 +503,34 @@ static bool display_input(InputEvent* event, void* context) {
             if(model->mode == GoshuinDisplayStamp) {
                 const bool multiband = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
                 if(event->key == InputKeyOk) {
+                    if(multiband && !model->show_info && model->seal_page) {
+                        model->band_page = model->seal_page - 1U;
+                    }
                     model->show_info = !model->show_info;
+                } else if(
+                    multiband && !model->show_info &&
+                    ((event->key == InputKeyLeft) || (event->key == InputKeyRight))) {
+                    if(event->key == InputKeyLeft) {
+                        model->seal_page = model->seal_page ? model->seal_page - 1U :
+                                                              GOSHUIN_MULTIBAND_COUNT;
+                    } else {
+                        model->seal_page =
+                            (model->seal_page + 1U) % (GOSHUIN_MULTIBAND_COUNT + 1U);
+                    }
+                    if(model->seal_page && !goshuin_multiband_generate_band_seal(
+                                               &model->record.payload.multiband,
+                                               model->seal_page - 1U,
+                                               model->individual_seal)) {
+                        model->seal_page = 0;
+                    }
                 } else if(multiband && model->show_info && (event->key == InputKeyLeft)) {
                     model->band_page = model->band_page ? model->band_page - 1U :
                                                           GOSHUIN_MULTIBAND_COUNT - 1U;
                 } else if(multiband && model->show_info && (event->key == InputKeyRight)) {
                     model->band_page = (model->band_page + 1U) % GOSHUIN_MULTIBAND_COUNT;
-                } else if((event->key == InputKeyLeft) || (event->key == InputKeyRight)) {
+                } else if(
+                    !multiband &&
+                    ((event->key == InputKeyLeft) || (event->key == InputKeyRight))) {
                     model->show_info = !model->show_info;
                 }
             }

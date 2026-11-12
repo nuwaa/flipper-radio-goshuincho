@@ -57,3 +57,5 @@ Each packed band record is exactly 34 bytes:
 | 18 | sixteen signed RSSI peak samples | 16 |
 
 The average is signed integer division truncated toward zero. Decoding rejects wrong counts, masks, timings, source/status, algorithm/preset, unknown or duplicate band IDs, mismatched requested frequencies, invalid actual frequencies, frequency error over 1 kHz, inconsistent statistics, seed, or bitmap. The seed hashes place, timestamp, algorithm version, and every band ID/requested Hz/actual Hz/sample array in stored order.
+
+The stored 1,024-byte bitmap remains the five-band composite seal. Five individual band seals are deterministically derived on demand from the v3 place, timestamp, algorithm version, selected band ID/frequencies, and its sixteen samples. They are not additional payload fields, so existing v3 records remain byte-compatible and gain the individual views without rewriting.

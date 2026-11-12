@@ -9,5 +9,5 @@ App(
     sources=["goshuin_stamp.c", "goshuin_multiband.c", "radio_goshuincho.c"],
     fap_author="Radio Goshuincho contributors",
     fap_description="Create location stamps from receive-only Sub-GHz RSSI observations",
-    fap_version="0.3.0",
+    fap_version="0.3.1",
 )

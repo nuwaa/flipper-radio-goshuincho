@@ -66,6 +66,10 @@ void goshuin_multiband_initialize(
     uint16_t peak_read_interval_ms);
 
 bool goshuin_multiband_finalize(GoshuinStampPayloadV3* stamp);
+bool goshuin_multiband_generate_band_seal(
+    const GoshuinStampPayloadV3* stamp,
+    size_t band_index,
+    uint8_t* seal);
 bool goshuin_multiband_decode(
     const void* payload,
     size_t payload_size,

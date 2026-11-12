@@ -77,6 +77,18 @@ int main(void) {
     GoshuinStampPayloadV3 multi_decoded;
     assert(goshuin_multiband_decode(&multi, sizeof(multi), &multi_decoded));
     assert(!memcmp(&multi, &multi_decoded, sizeof(multi)));
+    uint8_t individual_seals[GOSHUIN_MULTIBAND_COUNT][GOSHUIN_SEAL_BYTES];
+    uint8_t repeated_seal[GOSHUIN_SEAL_BYTES];
+    for(size_t band_index = 0; band_index < GOSHUIN_MULTIBAND_COUNT; ++band_index) {
+        assert(goshuin_multiband_generate_band_seal(
+            &multi, band_index, individual_seals[band_index]));
+        assert(goshuin_multiband_generate_band_seal(&multi, band_index, repeated_seal));
+        assert(!memcmp(individual_seals[band_index], repeated_seal, sizeof(repeated_seal)));
+        for(size_t previous = 0; previous < band_index; ++previous) {
+            assert(memcmp(
+                individual_seals[band_index], individual_seals[previous], GOSHUIN_SEAL_BYTES));
+        }
+    }
 
     GoshuinStampPayloadV3 changed = multi;
     changed.bands[2].rssi_samples[7]++;
@@ -84,6 +96,10 @@ int main(void) {
     assert(goshuin_multiband_finalize(&changed));
     assert(changed.seed != multi.seed);
     assert(memcmp(changed.seal, multi.seal, sizeof(multi.seal)));
+    assert(goshuin_multiband_generate_band_seal(&changed, 2U, repeated_seal));
+    assert(memcmp(repeated_seal, individual_seals[2], sizeof(repeated_seal)));
+    assert(goshuin_multiband_generate_band_seal(&changed, 0U, repeated_seal));
+    assert(!memcmp(repeated_seal, individual_seals[0], sizeof(repeated_seal)));
 
     GoshuinStampPayloadV3 reordered = multi;
     GoshuinBandPayloadV3 swap_band = reordered.bands[0];

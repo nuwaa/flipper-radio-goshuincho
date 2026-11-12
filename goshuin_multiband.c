@@ -113,6 +113,77 @@ static void generate_seal(GoshuinStampPayloadV3* stamp) {
     }
 }
 
+bool goshuin_multiband_generate_band_seal(
+    const GoshuinStampPayloadV3* stamp,
+    size_t band_index,
+    uint8_t* seal) {
+    if(!stamp || !seal || (band_index >= GOSHUIN_MULTIBAND_COUNT)) return false;
+    const GoshuinBandPayloadV3* band = &stamp->bands[band_index];
+    if((band->valid_count != GOSHUIN_MULTIBAND_SAMPLES) ||
+       (band->valid_mask != GOSHUIN_MULTIBAND_VALID_MASK)) {
+        return false;
+    }
+
+    uint32_t seed = 2166136261UL;
+    seed = fnv_update(seed, stamp->location, strlen(stamp->location));
+    seed = fnv_update(seed, &stamp->year, 7U);
+    seed = fnv_update(seed, &stamp->algorithm_version, 1U);
+    seed = fnv_update(seed, &band->band_id, sizeof(band->band_id));
+    seed = fnv_update(seed, &band->requested_frequency_hz, sizeof(uint32_t));
+    seed = fnv_update(seed, &band->actual_frequency_hz, sizeof(uint32_t));
+    seed = fnv_update(seed, band->rssi_samples, sizeof(band->rssi_samples));
+    if(!seed) seed = 0x6D2B79F5UL;
+
+    memset(seal, 0, GOSHUIN_SEAL_BYTES);
+    for(int32_t x = 0; x < 128; ++x) {
+        set_pixel(seal, x, 0);
+        set_pixel(seal, x, 2);
+        set_pixel(seal, x, 61);
+        set_pixel(seal, x, 63);
+    }
+    for(int32_t y = 0; y < 64; ++y) {
+        set_pixel(seal, 0, y);
+        set_pixel(seal, 2, y);
+        set_pixel(seal, 125, y);
+        set_pixel(seal, 127, y);
+    }
+
+    uint32_t state = seed;
+    const size_t density = (size_t)((int32_t)band->rssi_average + 128) + 80U;
+    for(size_t i = 0; i < density; ++i) {
+        const int32_t x = 4 + (int32_t)(prng_next(&state) % 60U);
+        const int32_t y = 4 + (int32_t)(prng_next(&state) % 28U);
+        set_pixel(seal, x, y);
+        set_pixel(seal, 127 - x, y);
+        set_pixel(seal, x, 63 - y);
+        set_pixel(seal, 127 - x, 63 - y);
+    }
+
+    int32_t last_x = 4;
+    int32_t last_y = sample_y(band->rssi_samples[0]);
+    for(size_t i = 0; i < GOSHUIN_MULTIBAND_SAMPLES; ++i) {
+        const int32_t x = 4 + (int32_t)(i * 119U / (GOSHUIN_MULTIBAND_SAMPLES - 1U));
+        const int32_t y = sample_y(band->rssi_samples[i]);
+        draw_line(seal, last_x, last_y, x, y);
+        draw_line(seal, last_x, 63 - last_y, x, 63 - y);
+        last_x = x;
+        last_y = y;
+    }
+
+    for(size_t marker = 0; marker < GOSHUIN_MULTIBAND_COUNT; ++marker) {
+        const int32_t x = 44 + (int32_t)marker * 10;
+        set_pixel(seal, x, 5);
+        set_pixel(seal, x + 1, 5);
+        if(marker == band_index) {
+            set_pixel(seal, x, 6);
+            set_pixel(seal, x + 1, 6);
+            set_pixel(seal, x, 7);
+            set_pixel(seal, x + 1, 7);
+        }
+    }
+    return true;
+}
+
 bool goshuin_multiband_frequency_valid(uint32_t frequency_hz) {
     return ((frequency_hz >= 299999755UL) && (frequency_hz <= 348000335UL)) ||
            ((frequency_hz >= 386999938UL) && (frequency_hz <= 464000000UL)) ||

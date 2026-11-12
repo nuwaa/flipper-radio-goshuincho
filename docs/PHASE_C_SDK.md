@@ -15,3 +15,5 @@ The CC1101 formula in the matching official source predicts these actual frequen
 | 922,500,000 | 922,499,725 | 275 Hz |
 
 No TX mode, async TX, packet write, transmitter, replay, or protocol decoder is used. The OOK preset defines the receiver filter configuration; RSSI values do not identify a modulation or source. Public low-level APIs remain firmware-coupled, so every Release must be rebuilt and tested on matching firmware.
+
+Individual band seals are a display/generation feature only. They use the already stored RSSI values and do not perform additional RF access when browsing a record.
