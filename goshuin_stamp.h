@@ -17,6 +17,7 @@
 typedef enum {
     GoshuinMeasurementDummy = 0,
     GoshuinMeasurementSubGhzReceive = 1,
+    GoshuinMeasurementMultiBandReceive = 2,
 } GoshuinMeasurementSource;
 
 typedef enum {
@@ -58,6 +59,9 @@ typedef struct __attribute__((packed)) {
     int8_t rssi_samples[GOSHUIN_MAX_RSSI_SAMPLE_COUNT];
     uint8_t seal[GOSHUIN_SEAL_BYTES];
 } GoshuinStampPayload;
+
+_Static_assert(sizeof(GoshuinStampPayloadV1) == 1085U, "Version 1 layout changed");
+_Static_assert(sizeof(GoshuinStampPayload) == 1127U, "Version 2 layout changed");
 
 void goshuin_stamp_create_demo(
     GoshuinStampPayload* stamp,
