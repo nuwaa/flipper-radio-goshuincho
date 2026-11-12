@@ -10,5 +10,6 @@ cc -std=c11 -Wall -Wextra -Werror \
     -x c "$test_dir/stamp_host_test.c.txt" \
     "$repo_dir/goshuin_stamp.c" "$repo_dir/goshuin_multiband.c" \
     "$repo_dir/goshuin_themes.c" "$repo_dir/goshuin_themed.c" \
+    "$repo_dir/goshuin_collectible.c" \
     -o "$output_file"
 "$output_file"

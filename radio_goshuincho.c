@@ -1,3 +1,4 @@
+#include "goshuin_collectible.h"
 #include "goshuin_multiband.h"
 #include "goshuin_stamp.h"
 #include "goshuin_themed.h"
@@ -50,12 +51,14 @@ typedef enum {
     GoshuinViewMeasure,
     GoshuinViewMultiMeasure,
     GoshuinViewTheme,
+    GoshuinViewBook,
 } GoshuinViewId;
 
 typedef enum {
     GoshuinMainMulti,
     GoshuinMainReal,
     GoshuinMainDemo,
+    GoshuinMainBook,
     GoshuinMainSaved,
     GoshuinMainAbout,
 } GoshuinMainItem;
@@ -81,6 +84,7 @@ typedef enum {
     GoshuinReturnMain,
     GoshuinReturnSaved,
     GoshuinReturnTheme,
+    GoshuinReturnBook,
 } GoshuinReturnTarget;
 
 typedef enum {
@@ -97,6 +101,7 @@ typedef struct {
         GoshuinStampPayload legacy;
         GoshuinStampPayloadV3 multiband;
         GoshuinStampPayloadV4 themed;
+        GoshuinStampPayloadV5 collectible;
     } payload;
 } GoshuinRecord;
 
@@ -129,6 +134,13 @@ typedef struct {
 } GoshuinMultiMeasureModel;
 
 typedef struct {
+    bool empty;
+    size_t index;
+    size_t count;
+    GoshuinRecord record;
+} GoshuinBookModel;
+
+typedef struct {
     ViewDispatcher* view_dispatcher;
     Submenu* main_menu;
     Submenu* saved_menu;
@@ -137,6 +149,7 @@ typedef struct {
     View* display_view;
     View* measure_view;
     View* multi_measure_view;
+    View* book_view;
     Storage* storage;
     GoshuinViewId current_view;
     GoshuinReturnTarget display_return;
@@ -255,14 +268,14 @@ static bool write_legacy_stamp(
         output_size);
 }
 
-static bool write_themed_stamp(
+static bool write_collectible_stamp(
     RadioGoshuinchoApp* app,
-    const GoshuinStampPayloadV4* stamp,
+    const GoshuinStampPayloadV5* stamp,
     char* output_path,
     size_t output_size) {
     return write_payload(
         app,
-        GOSHUIN_FILE_VERSION_V4,
+        GOSHUIN_FILE_VERSION_V5,
         stamp,
         sizeof(*stamp),
         stamp->year,
@@ -284,6 +297,7 @@ static bool read_record(RadioGoshuinchoApp* app, const char* path, GoshuinRecord
         GoshuinStampPayload v2;
         GoshuinStampPayloadV3 v3;
         GoshuinStampPayloadV4 v4;
+        GoshuinStampPayloadV5 v5;
     } payload;
     File* file = storage_file_alloc(app->storage);
     bool success = storage_file_open(file, path, FSAM_READ, FSOM_OPEN_EXISTING);
@@ -298,7 +312,9 @@ static bool read_record(RadioGoshuinchoApp* app, const char* path, GoshuinRecord
                    ((header.format_version == GOSHUIN_FILE_VERSION_V3) &&
                     (header.payload_size == sizeof(GoshuinStampPayloadV3))) ||
                    ((header.format_version == GOSHUIN_FILE_VERSION_V4) &&
-                    (header.payload_size == sizeof(GoshuinStampPayloadV4))));
+                    (header.payload_size == sizeof(GoshuinStampPayloadV4))) ||
+                   ((header.format_version == GOSHUIN_FILE_VERSION_V5) &&
+                    (header.payload_size == sizeof(GoshuinStampPayloadV5))));
     }
     if(success)
         success = storage_file_read(file, &payload, header.payload_size) == header.payload_size;
@@ -307,7 +323,10 @@ static bool read_record(RadioGoshuinchoApp* app, const char* path, GoshuinRecord
     if(success) success = header.payload_crc32 == goshuin_crc32(&payload, header.payload_size);
     if(success) {
         record->format_version = header.format_version;
-        if(header.format_version == GOSHUIN_FILE_VERSION_V4) {
+        if(header.format_version == GOSHUIN_FILE_VERSION_V5) {
+            success = goshuin_collectible_decode(
+                &payload, header.payload_size, &record->payload.collectible);
+        } else if(header.format_version == GOSHUIN_FILE_VERSION_V4) {
             success = goshuin_themed_decode(&payload, header.payload_size, &record->payload.themed);
         } else if(header.format_version == GOSHUIN_FILE_VERSION_V3) {
             success = goshuin_multiband_decode(
@@ -332,11 +351,17 @@ static void display_record(
             model->mode = GoshuinDisplayStamp;
             model->show_info = true;
             model->save_prompt = false;
-            model->band_page =
-                (record->format_version == GOSHUIN_FILE_VERSION_V4) &&
-                        (record->payload.themed.theme_id >= GoshuinTheme315) ?
-                    (uint8_t)(record->payload.themed.theme_id - GoshuinTheme315) :
-                    0U;
+            if((record->format_version == GOSHUIN_FILE_VERSION_V5) &&
+               (record->payload.collectible.theme_id >= GoshuinTheme315)) {
+                model->band_page =
+                    (uint8_t)(record->payload.collectible.theme_id - GoshuinTheme315);
+            } else if((record->format_version == GOSHUIN_FILE_VERSION_V4) &&
+                      (record->payload.themed.theme_id >= GoshuinTheme315)) {
+                model->band_page =
+                    (uint8_t)(record->payload.themed.theme_id - GoshuinTheme315);
+            } else {
+                model->band_page = 0U;
+            }
             model->record = *record;
             model->message[0] = '\0';
         },
@@ -370,10 +395,10 @@ static void display_draw(Canvas* canvas, void* context) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 9, AlignCenter, AlignBottom, "Radio Goshuincho");
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 3, 22, "Phase D - RX only");
+        canvas_draw_str(canvas, 3, 22, "Phase E - RX only");
         canvas_draw_str(canvas, 3, 32, "5 Bands + Real + Demo");
         canvas_draw_str(canvas, 3, 42, "No Sub-GHz TX capability");
-        canvas_draw_str(canvas, 3, 52, "Version 0.4.0 / microSD");
+        canvas_draw_str(canvas, 3, 52, "Version 0.5.0 / microSD");
         elements_button_left(canvas, "Back");
         return;
     }
@@ -388,8 +413,10 @@ static void display_draw(Canvas* canvas, void* context) {
 
     const bool v3 = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
     const bool v4 = model->record.format_version == GOSHUIN_FILE_VERSION_V4;
-    const bool multiband = v3 || v4;
-    const uint8_t* seal = v4   ? model->record.payload.themed.seal :
+    const bool v5 = model->record.format_version == GOSHUIN_FILE_VERSION_V5;
+    const bool multiband = v3 || v4 || v5;
+    const uint8_t* seal = v5   ? model->record.payload.collectible.seal :
+                          v4   ? model->record.payload.themed.seal :
                           v3   ? model->record.payload.multiband.seal :
                                  model->record.payload.legacy.seal;
     if(!model->show_info) {
@@ -401,7 +428,14 @@ static void display_draw(Canvas* canvas, void* context) {
     char line[48];
     char title[24];
     canvas_set_font(canvas, FontPrimary);
-    if(v4) {
+    if(v5) {
+        snprintf(
+            title,
+            sizeof(title),
+            "%s %s",
+            goshuin_season_name((GoshuinSeasonId)model->record.payload.collectible.season_id),
+            goshuin_rarity_name((GoshuinRarityId)model->record.payload.collectible.rarity_id));
+    } else if(v4) {
         snprintf(
             title,
             sizeof(title),
@@ -419,22 +453,30 @@ static void display_draw(Canvas* canvas, void* context) {
     canvas_draw_str_aligned(canvas, 64, 9, AlignCenter, AlignBottom, title);
     canvas_set_font(canvas, FontSecondary);
     if(multiband) {
-        const GoshuinBandPayloadV3* band = v4 ?
-                                                   &model->record.payload.themed.bands[model->band_page] :
-                                                   &model->record.payload.multiband.bands[model->band_page];
-        const char* location = v4 ? model->record.payload.themed.location :
+        const GoshuinBandPayloadV3* band =
+            v5 ? &model->record.payload.collectible.bands[model->band_page] :
+            v4 ? &model->record.payload.themed.bands[model->band_page] :
+                 &model->record.payload.multiband.bands[model->band_page];
+        const char* location = v5 ? model->record.payload.collectible.location :
+                               v4 ? model->record.payload.themed.location :
                                     model->record.payload.multiband.location;
-        const uint16_t year = v4 ? model->record.payload.themed.year :
+        const uint16_t year = v5 ? model->record.payload.collectible.year :
+                              v4 ? model->record.payload.themed.year :
                                    model->record.payload.multiband.year;
-        const uint8_t month = v4 ? model->record.payload.themed.month :
+        const uint8_t month = v5 ? model->record.payload.collectible.month :
+                              v4 ? model->record.payload.themed.month :
                                    model->record.payload.multiband.month;
-        const uint8_t day = v4 ? model->record.payload.themed.day :
+        const uint8_t day = v5 ? model->record.payload.collectible.day :
+                            v4 ? model->record.payload.themed.day :
                                  model->record.payload.multiband.day;
-        const uint8_t hour = v4 ? model->record.payload.themed.hour :
+        const uint8_t hour = v5 ? model->record.payload.collectible.hour :
+                             v4 ? model->record.payload.themed.hour :
                                   model->record.payload.multiband.hour;
-        const uint8_t minute = v4 ? model->record.payload.themed.minute :
+        const uint8_t minute = v5 ? model->record.payload.collectible.minute :
+                               v4 ? model->record.payload.themed.minute :
                                     model->record.payload.multiband.minute;
-        const uint8_t second = v4 ? model->record.payload.themed.second :
+        const uint8_t second = v5 ? model->record.payload.collectible.second :
+                               v4 ? model->record.payload.themed.second :
                                     model->record.payload.multiband.second;
         snprintf(line, sizeof(line), "Place: %s", location);
         canvas_draw_str(canvas, 2, 20, line);
@@ -512,7 +554,8 @@ static void display_draw(Canvas* canvas, void* context) {
 
 static void save_theme_preview(RadioGoshuinchoApp* app) {
     char path[GOSHUIN_PATH_CAPACITY];
-    if(write_themed_stamp(app, &app->working_record.payload.themed, path, sizeof(path))) {
+    if(write_collectible_stamp(
+           app, &app->working_record.payload.collectible, path, sizeof(path))) {
         app->preview_pending = false;
         with_view_model(
             app->display_view,
@@ -536,6 +579,7 @@ static bool display_input(InputEvent* event, void* context) {
         const GoshuinViewId target = app->display_return == GoshuinReturnSaved ?
                                          GoshuinViewSaved :
                                      app->display_return == GoshuinReturnTheme ? GoshuinViewTheme :
+                                     app->display_return == GoshuinReturnBook  ? GoshuinViewBook :
                                                                                 GoshuinViewMain;
         switch_view(app, target);
         return true;
@@ -551,7 +595,8 @@ static bool display_input(InputEvent* event, void* context) {
             if(model->mode == GoshuinDisplayStamp) {
                 const bool multiband =
                     (model->record.format_version == GOSHUIN_FILE_VERSION_V3) ||
-                    (model->record.format_version == GOSHUIN_FILE_VERSION_V4);
+                    (model->record.format_version == GOSHUIN_FILE_VERSION_V4) ||
+                    (model->record.format_version == GOSHUIN_FILE_VERSION_V5);
                 if(event->key == InputKeyOk) {
                     model->show_info = !model->show_info;
                 } else if(multiband && model->show_info && (event->key == InputKeyLeft)) {
@@ -925,11 +970,12 @@ static void theme_item_callback(void* context, uint32_t index) {
     RadioGoshuinchoApp* app = context;
     const GoshuinThemeId theme = (GoshuinThemeId)index;
     if(!app->multi_observation_ready ||
-       !goshuin_themed_create(&app->working_record.payload.themed, &app->multi_observation, theme)) {
+       !goshuin_collectible_create(
+           &app->working_record.payload.collectible, &app->multi_observation, theme)) {
         display_message(app, GoshuinDisplayError, "Theme generation failed", GoshuinReturnTheme);
         return;
     }
-    app->working_record.format_version = GOSHUIN_FILE_VERSION_V4;
+    app->working_record.format_version = GOSHUIN_FILE_VERSION_V5;
     app->preview_pending = true;
     display_record(app, &app->working_record, GoshuinReturnTheme);
     with_view_model(
@@ -1142,7 +1188,17 @@ static void load_saved_menu(RadioGoshuinchoApp* app) {
         if(!read_record(app, app->saved_paths[i], &app->working_record)) continue;
         if(valid != i)
             memcpy(app->saved_paths[valid], app->saved_paths[i], sizeof(app->saved_paths[valid]));
-        if(app->working_record.format_version == GOSHUIN_FILE_VERSION_V4) {
+        if(app->working_record.format_version == GOSHUIN_FILE_VERSION_V5) {
+            const GoshuinStampPayloadV5* stamp = &app->working_record.payload.collectible;
+            snprintf(
+                app->saved_labels[valid],
+                GOSHUIN_LABEL_CAPACITY,
+                "%s %02u-%02u %s",
+                goshuin_rarity_name((GoshuinRarityId)stamp->rarity_id),
+                stamp->month,
+                stamp->day,
+                stamp->location);
+        } else if(app->working_record.format_version == GOSHUIN_FILE_VERSION_V4) {
             const GoshuinStampPayloadV4* stamp = &app->working_record.payload.themed;
             snprintf(
                 app->saved_labels[valid],
@@ -1191,6 +1247,158 @@ static void load_saved_menu(RadioGoshuinchoApp* app) {
         submenu_add_item(app->saved_menu, "No saved stamps", UINT32_MAX, NULL, NULL);
 }
 
+static const uint8_t* record_seal(const GoshuinRecord* record) {
+    if(record->format_version == GOSHUIN_FILE_VERSION_V5)
+        return record->payload.collectible.seal;
+    if(record->format_version == GOSHUIN_FILE_VERSION_V4) return record->payload.themed.seal;
+    if(record->format_version == GOSHUIN_FILE_VERSION_V3) return record->payload.multiband.seal;
+    return record->payload.legacy.seal;
+}
+
+static const char* record_location(const GoshuinRecord* record) {
+    if(record->format_version == GOSHUIN_FILE_VERSION_V5)
+        return record->payload.collectible.location;
+    if(record->format_version == GOSHUIN_FILE_VERSION_V4) return record->payload.themed.location;
+    if(record->format_version == GOSHUIN_FILE_VERSION_V3)
+        return record->payload.multiband.location;
+    return record->payload.legacy.location;
+}
+
+static bool seal_pixel(const uint8_t* seal, size_t x, size_t y) {
+    return seal[y * (GOSHUIN_SEAL_WIDTH / 8U) + x / 8U] & (1U << (x & 7U));
+}
+
+static void draw_book_seal(Canvas* canvas, const uint8_t* seal) {
+    canvas_draw_frame(canvas, 31, 10, 66, 35);
+    for(size_t y = 0; y < GOSHUIN_SEAL_HEIGHT / 2U; ++y) {
+        for(size_t x = 0; x < GOSHUIN_SEAL_WIDTH / 2U; ++x) {
+            const size_t source_x = x * 2U;
+            const size_t source_y = y * 2U;
+            if(seal_pixel(seal, source_x, source_y) ||
+               seal_pixel(seal, source_x + 1U, source_y) ||
+               seal_pixel(seal, source_x, source_y + 1U) ||
+               seal_pixel(seal, source_x + 1U, source_y + 1U)) {
+                canvas_draw_dot(canvas, 32 + (int32_t)x, 11 + (int32_t)y);
+            }
+        }
+    }
+}
+
+static void book_draw(Canvas* canvas, void* context) {
+    const GoshuinBookModel* model = context;
+    canvas_clear(canvas);
+    canvas_set_font(canvas, FontPrimary);
+    if(model->empty) {
+        canvas_draw_str_aligned(canvas, 64, 20, AlignCenter, AlignCenter, "Goshuin Book");
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(canvas, 64, 38, AlignCenter, AlignCenter, "No saved stamps");
+        elements_button_left(canvas, "Back");
+        return;
+    }
+    char line[40];
+    if(model->record.format_version == GOSHUIN_FILE_VERSION_V5) {
+        snprintf(
+            line,
+            sizeof(line),
+            "Book %u/%u %s",
+            (unsigned)(model->index + 1U),
+            (unsigned)model->count,
+            goshuin_season_name(
+                (GoshuinSeasonId)model->record.payload.collectible.season_id));
+    } else {
+        snprintf(
+            line,
+            sizeof(line),
+            "Goshuin Book %u/%u",
+            (unsigned)(model->index + 1U),
+            (unsigned)model->count);
+    }
+    canvas_draw_str_aligned(canvas, 64, 8, AlignCenter, AlignBottom, line);
+    draw_book_seal(canvas, record_seal(&model->record));
+    canvas_set_font(canvas, FontSecondary);
+    if(model->record.format_version == GOSHUIN_FILE_VERSION_V5) {
+        snprintf(
+            line,
+            sizeof(line),
+            "%.12s / %s",
+            record_location(&model->record),
+            goshuin_rarity_name(
+                (GoshuinRarityId)model->record.payload.collectible.rarity_id));
+    } else {
+        snprintf(line, sizeof(line), "%s", record_location(&model->record));
+    }
+    canvas_draw_str_aligned(canvas, 64, 53, AlignCenter, AlignBottom, line);
+    elements_button_left(canvas, "Prev");
+    elements_button_center(canvas, "Open");
+    elements_button_right(canvas, "Next");
+}
+
+static bool book_load_index(RadioGoshuinchoApp* app, size_t index) {
+    if((index >= app->saved_count) ||
+       !read_record(app, app->saved_paths[index], &app->working_record)) {
+        return false;
+    }
+    with_view_model(
+        app->book_view,
+        GoshuinBookModel * model,
+        {
+            model->empty = false;
+            model->index = index;
+            model->count = app->saved_count;
+            model->record = app->working_record;
+        },
+        true);
+    return true;
+}
+
+static void open_book(RadioGoshuinchoApp* app) {
+    load_saved_menu(app);
+    if(!app->saved_count || !book_load_index(app, 0U)) {
+        with_view_model(
+            app->book_view,
+            GoshuinBookModel * model,
+            {
+                memset(model, 0, sizeof(*model));
+                model->empty = true;
+            },
+            true);
+    }
+    switch_view(app, GoshuinViewBook);
+}
+
+static bool book_input(InputEvent* event, void* context) {
+    RadioGoshuinchoApp* app = context;
+    if(event->type != InputTypeShort) return false;
+    if(event->key == InputKeyBack) {
+        switch_view(app, GoshuinViewMain);
+        return true;
+    }
+    bool empty;
+    size_t index;
+    size_t count;
+    with_view_model(
+        app->book_view,
+        GoshuinBookModel * model,
+        {
+            empty = model->empty;
+            index = model->index;
+            count = model->count;
+        },
+        false);
+    if(empty || !count) return false;
+    if(event->key == InputKeyLeft) {
+        return book_load_index(app, index ? index - 1U : count - 1U);
+    }
+    if(event->key == InputKeyRight) {
+        return book_load_index(app, (index + 1U) % count);
+    }
+    if(event->key == InputKeyOk) {
+        display_record(app, &app->working_record, GoshuinReturnBook);
+        return true;
+    }
+    return false;
+}
+
 static void begin_location(RadioGoshuinchoApp* app, GoshuinMode mode) {
     app->pending_mode = mode;
     app->location[0] = '\0';
@@ -1214,11 +1422,13 @@ static void main_menu_callback(void* context, uint32_t index) {
         begin_location(app, GoshuinModeReal);
     else if(index == GoshuinMainDemo)
         begin_location(app, GoshuinModeDemo);
+    else if(index == GoshuinMainBook)
+        open_book(app);
     else if(index == GoshuinMainSaved) {
         load_saved_menu(app);
         switch_view(app, GoshuinViewSaved);
     } else if(index == GoshuinMainAbout) {
-        display_message(app, GoshuinDisplayAbout, "Radio Goshuincho Phase D", GoshuinReturnMain);
+        display_message(app, GoshuinDisplayAbout, "Radio Goshuincho Phase E", GoshuinReturnMain);
     }
 }
 
@@ -1245,6 +1455,7 @@ static RadioGoshuinchoApp* app_alloc(void) {
     app->display_view = view_alloc();
     app->measure_view = view_alloc();
     app->multi_measure_view = view_alloc();
+    app->book_view = view_alloc();
     view_allocate_model(app->display_view, ViewModelTypeLocking, sizeof(GoshuinDisplayModel));
     view_set_context(app->display_view, app);
     view_set_draw_callback(app->display_view, display_draw);
@@ -1258,10 +1469,15 @@ static RadioGoshuinchoApp* app_alloc(void) {
     view_set_context(app->multi_measure_view, app);
     view_set_draw_callback(app->multi_measure_view, multi_draw);
     view_set_input_callback(app->multi_measure_view, multi_input);
+    view_allocate_model(app->book_view, ViewModelTypeLocking, sizeof(GoshuinBookModel));
+    view_set_context(app->book_view, app);
+    view_set_draw_callback(app->book_view, book_draw);
+    view_set_input_callback(app->book_view, book_input);
     submenu_set_header(app->main_menu, "Radio Goshuincho");
     submenu_add_item(app->main_menu, "5 Bands", GoshuinMainMulti, main_menu_callback, app);
     submenu_add_item(app->main_menu, "Real RF", GoshuinMainReal, main_menu_callback, app);
     submenu_add_item(app->main_menu, "Demo", GoshuinMainDemo, main_menu_callback, app);
+    submenu_add_item(app->main_menu, "Goshuin Book", GoshuinMainBook, main_menu_callback, app);
     submenu_add_item(app->main_menu, "Saved Stamps", GoshuinMainSaved, main_menu_callback, app);
     submenu_add_item(app->main_menu, "About", GoshuinMainAbout, main_menu_callback, app);
     view_dispatcher_add_view(
@@ -1276,6 +1492,7 @@ static RadioGoshuinchoApp* app_alloc(void) {
         app->view_dispatcher, GoshuinViewMultiMeasure, app->multi_measure_view);
     view_dispatcher_add_view(
         app->view_dispatcher, GoshuinViewTheme, submenu_get_view(app->theme_menu));
+    view_dispatcher_add_view(app->view_dispatcher, GoshuinViewBook, app->book_view);
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, custom_event);
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, navigation);
@@ -1293,6 +1510,8 @@ static void app_free(RadioGoshuinchoApp* app) {
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewMeasure);
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewMultiMeasure);
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewTheme);
+    view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewBook);
+    view_free(app->book_view);
     view_free(app->multi_measure_view);
     view_free(app->measure_view);
     view_free(app->display_view);

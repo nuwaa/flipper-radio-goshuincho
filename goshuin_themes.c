@@ -367,3 +367,156 @@ const char* goshuin_theme_name(GoshuinThemeId theme) {
         return "Unknown";
     }
 }
+
+GoshuinSeasonId goshuin_theme_season_from_month(uint8_t month) {
+    if((month >= 3U) && (month <= 5U)) return GoshuinSeasonSpring;
+    if((month >= 6U) && (month <= 8U)) return GoshuinSeasonSummer;
+    if((month >= 9U) && (month <= 11U)) return GoshuinSeasonAutumn;
+    return GoshuinSeasonWinter;
+}
+
+static uint8_t feature_signature(const GoshuinRssiFeatures* features) {
+    if(features->range <= 4U) return 0U;
+    if(features->turn_count >= 5U) return 2U;
+    if(features->peak_count >= 2U) return 1U;
+    if(features->trend >= 12) return 3U;
+    if(features->trend <= -12) return 4U;
+    return 5U;
+}
+
+GoshuinRarityId goshuin_theme_classify_rarity(
+    const GoshuinThemeBandInput* bands,
+    size_t band_count) {
+    if(!bands || !band_count || (band_count > 5U)) return GoshuinRarityStandard;
+    uint8_t signatures = 0U;
+    uint16_t peaks = 0U;
+    uint16_t turns = 0U;
+    uint8_t quiet = 0U;
+    uint8_t maximum_range = 0U;
+    for(size_t i = 0; i < band_count; ++i) {
+        GoshuinRssiFeatures features;
+        if(!goshuin_theme_extract_features(
+               bands[i].samples, bands[i].sample_count, &features)) {
+            return GoshuinRarityStandard;
+        }
+        const uint8_t signature = feature_signature(&features);
+        signatures |= (uint8_t)(1U << signature);
+        peaks += features.peak_count;
+        turns += features.turn_count;
+        if(features.range <= 4U) ++quiet;
+        if(features.range > maximum_range) maximum_range = features.range;
+    }
+    uint8_t signature_count = 0U;
+    for(uint8_t value = signatures; value; value >>= 1U)
+        signature_count += value & 1U;
+    if((band_count >= 5U) && (signature_count >= 4U)) return GoshuinRarityHarmony;
+    if(quiet == band_count) return GoshuinRarityQuiet;
+    if((maximum_range >= 45U) || (turns >= 30U)) return GoshuinRarityStorm;
+    if(peaks >= (uint16_t)(band_count * 2U)) return GoshuinRaritySpark;
+    return GoshuinRarityStandard;
+}
+
+static void draw_snowflake(uint8_t* seal, int32_t x, int32_t y) {
+    line(seal, x - 4, y, x + 4, y);
+    line(seal, x, y - 4, x, y + 4);
+    line(seal, x - 3, y - 3, x + 3, y + 3);
+    line(seal, x + 3, y - 3, x - 3, y + 3);
+}
+
+bool goshuin_theme_apply_collectible(
+    uint8_t* seal,
+    GoshuinSeasonId season,
+    GoshuinRarityId rarity,
+    uint32_t seed) {
+    if(!seal || (season < GoshuinSeasonSpring) || (season > GoshuinSeasonWinter) ||
+       (rarity > GoshuinRarityHarmony)) {
+        return false;
+    }
+    switch(season) {
+    case GoshuinSeasonSpring:
+        for(int32_t i = 0; i < 3; ++i) {
+            const int32_t x = 11 + i * 8;
+            diamond(seal, x, 9 + (int32_t)((seed >> i) & 1U), 3, 2);
+            diamond(seal, 127 - x, 54 - (int32_t)((seed >> (i + 3)) & 1U), 3, 2);
+        }
+        break;
+    case GoshuinSeasonSummer:
+        for(int32_t i = 0; i < 3; ++i) {
+            line(seal, 8 + i * 10, 55 - i, 13 + i * 10, 52 - i);
+            line(seal, 13 + i * 10, 52 - i, 18 + i * 10, 55 - i);
+            line(seal, 109 - i * 10, 9 + i, 114 - i * 10, 12 + i);
+            line(seal, 114 - i * 10, 12 + i, 119 - i * 10, 9 + i);
+        }
+        break;
+    case GoshuinSeasonAutumn:
+        circle(seal, 113, 12, 6 + (seed & 1U));
+        for(int32_t i = 0; i < 3; ++i) {
+            diamond(seal, 12 + i * 9, 51 + (i & 1), 4, 2);
+            line(seal, 12 + i * 9, 51, 15 + i * 9, 56);
+        }
+        break;
+    case GoshuinSeasonWinter:
+        draw_snowflake(seal, 13, 12);
+        draw_snowflake(seal, 114, 51);
+        if(seed & 1U) draw_snowflake(seal, 111, 13);
+        break;
+    }
+
+    switch(rarity) {
+    case GoshuinRarityQuiet:
+        circle(seal, 115, 50, 5);
+        circle(seal, 115, 50, 2);
+        break;
+    case GoshuinRaritySpark:
+        line(seal, 60, 5, 64, 11);
+        line(seal, 64, 11, 68, 5);
+        line(seal, 64, 3, 64, 12);
+        break;
+    case GoshuinRarityStorm:
+        line(seal, 8, 8, 17, 15);
+        line(seal, 17, 15, 10, 22);
+        line(seal, 118, 42, 111, 49);
+        line(seal, 111, 49, 120, 56);
+        break;
+    case GoshuinRarityHarmony:
+        for(int32_t i = 0; i < 5; ++i) {
+            const int32_t x = 48 + i * 8;
+            diamond(seal, x, 57 - (i & 1), 2, 2);
+        }
+        break;
+    case GoshuinRarityStandard:
+        pixel(seal, 7 + (seed % 5U), 56);
+        break;
+    }
+    return true;
+}
+
+const char* goshuin_season_name(GoshuinSeasonId season) {
+    switch(season) {
+    case GoshuinSeasonSpring:
+        return "Spring";
+    case GoshuinSeasonSummer:
+        return "Summer";
+    case GoshuinSeasonAutumn:
+        return "Autumn";
+    case GoshuinSeasonWinter:
+        return "Winter";
+    default:
+        return "Unknown";
+    }
+}
+
+const char* goshuin_rarity_name(GoshuinRarityId rarity) {
+    switch(rarity) {
+    case GoshuinRarityQuiet:
+        return "Quiet Seal";
+    case GoshuinRaritySpark:
+        return "Spark Seal";
+    case GoshuinRarityStorm:
+        return "Storm Seal";
+    case GoshuinRarityHarmony:
+        return "Five Harmony";
+    default:
+        return "Travel Seal";
+    }
+}

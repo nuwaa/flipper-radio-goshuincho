@@ -2,14 +2,32 @@
 
 ## 日本語
 
-Radio Goshuincho（電波御朱印帳）は、Flipper Zero内蔵Sub-GHz受信機で観測したRSSIから、場所と日時に結び付いた128×64モノクロ御朱印を作る受信専用アプリです。v0.4.0では、RSSIの平均・範囲・ピーク・時系列変化を使う7種類の紋章意匠と、5 Bands測定後のデザイン選択を追加しました。送信、プロトコルデコード、発信源の識別は行いません。
+Radio Goshuincho（電波御朱印帳）は、Flipper Zero内蔵Sub-GHz受信機で観測したRSSIから、場所と日時に結び付いた128×64モノクロ御朱印を作る受信専用アプリです。v0.5.0では御朱印帳ビュー、四季の装飾、観測パターンから決まる希少印を追加しました。送信、プロトコルデコード、発信源の識別は行いません。
 
 ### モード
 
-- `5 Bands`: 315.000 / 426.075 / 429.350 / 433.920 / 922.500 MHzを順次観測。各バンド16窓、各150 ms窓内で50 msごとに3回RSSIを読み、ピーク値を保存（合計80サンプル、約12.25秒）。測定後、五波統合印または帯域別の5意匠を選び、version 4で保存
+- `5 Bands`: 315.000 / 426.075 / 429.350 / 433.920 / 922.500 MHzを順次観測。測定後、五波統合印または帯域別の5意匠を選び、季節・希少印情報を持つversion 5で保存
 - `Real RF`: 433.920 MHzを200 ms間隔×50回（約10秒）観測し、車輪・走行軌跡の意匠をversion 2で保存
 - `Demo`: 決定的なダミーRSSIから二重枠の角印を生成し、version 2で保存
-- `Saved Stamps`: version 1/2/3/4を一覧・再表示。旧bitmapは変更しない
+- `Goshuin Book`: 保存印を縮小した帳面ページを左右キーで巡り、OKで原寸表示
+- `Saved Stamps`: version 1/2/3/4/5を一覧・再表示。旧bitmapは変更しない
+
+### 四季と希少印
+
+保存月から春（桜）、夏（波）、秋（月と葉）、冬（雪輪）の装飾を決定します。観測値は帯域ごとに特徴抽出し、次の称号を決定します。
+
+- `Travel Seal`: 通常の旅印
+- `Quiet Seal`: 全帯域の変動が小さい静寂印
+- `Spark Seal`: 短いピークが複数ある雷光印
+- `Storm Seal`: 大きな変動や方向転換が多い大荒印
+- `Five Harmony`: 5帯域で異なる傾向がそろった五波調和印
+
+称号は通信源の判定ではなく、保存されたRSSI配列の形状に対する芸術的な分類です。帯域間でRSSI絶対値の優劣は比較しません。
+新しく生成するDemoとReal RFのbitmapにも季節装飾と単一帯域の特徴印を加えますが、保存コンテナは互換性のためv2のままです。
+
+[四季の比較画像](previews/phase_e/seasons_comparison_8x.png) / [希少印の比較画像](previews/phase_e/rarities_comparison_8x.png)
+
+判定条件、v5互換性、御朱印帳の縮小方式は[Phase E設計資料](docs/PHASE_E_COLLECTION.md)に記載しています。
 
 ### Phase Dの意匠
 
@@ -33,6 +51,7 @@ ufbt update --channel=release
 ufbt
 tests/run_host_tests.sh
 tests/generate_theme_previews.sh
+tests/generate_collectible_previews.sh
 ```
 
 FAPは`dist/radio_goshuincho.fap`に生成されます。USBなら`ufbt launch`、qFlipperなら`/ext/apps/Tools/radio_goshuincho.fap`へコピーします。本体とSDKのRelease世代を合わせてください。保存先は`/ext/apps_data/radio_goshuincho/`です。
@@ -42,34 +61,43 @@ FAPは`dist/radio_goshuincho.fap`に生成されます。USBなら`ufbt launch`�
 1. `5 Bands`を選び、英数字・空白・ハイフンで場所名を入力します。
 2. 5バンドが順次表示されます。Backで中断できます。中断・失敗データは保存されず、Demoへ自動切替しません。
 3. 80サンプル完了後に`Choose`を押し、`5 Bands`または315/426/429/433/920 MHzの意匠を選びます。追加受信は行いません。
-4. プレビューでOK（`Save`）を押すとversion 4で保存されます。保存後にBackで選択画面へ戻り、同じ観測から別意匠も保存できます。
+4. プレビューでOK（`Save`）を押すとversion 5で保存されます。保存後にBackで選択画面へ戻り、同じ観測から別意匠も保存できます。
 5. 保存後の情報画面では左右キーで各バンドの実設定周波数、サンプル数、min/avg/maxを切り替え、OKで情報と印影を切り替えます。
 
-既存ファイルは上書き・変換しません。同名時は連番を付けます。v1/v2/v3の保存済みbitmapは変更せず、そのまま表示します。旧v3の生成器と厳密な再生成検証も維持しています。新意匠だけがテーマIDとアルゴリズム版を持つv4を使用します。
+既存ファイルは上書き・変換しません。同名時は連番を付けます。v1〜v4の保存済みbitmapと検証処理は変更しません。新しい季節意匠だけがv5を使用します。
 
-### Phase D実機テスト手順（未実施）
+### Phase E実機テスト手順（未実施）
 
 このクラウド環境にはFlipper Zeroが接続されていないため、次を実機で確認してください。
 
-1. 公式ReleaseファームウェアとmicroSDへv0.4.0を導入し、`About`の版と`RX only`を確認します。
-2. 既存のDemo、Real RF、v1/v2/v3保存印章の一覧・再表示とbitmapが維持されていることを確認します。
+1. 公式ReleaseファームウェアとmicroSDへv0.5.0を導入し、`About`の版と`RX only`を確認します。
+2. 既存のDemo、Real RF、v1〜v4保存印章の一覧・再表示とbitmapが維持されていることを確認します。
 3. `5 Bands`を開始し、315→426→429→433→920 MHzの順、各16サンプル、全体80サンプル、グラフとUI応答を確認します。
 4. 測定中にBackで中断し、取消表示後に戻れること、その後に標準Sub-GHzアプリが使えることを確認します。
 5. 完了後に6候補を順にプレビューし、テーマ差を確認します。二つ以上を保存し、その間に再受信がないことを確認します。
-6. v4一覧のテーマ名、5バンド情報、印影を確認し、再起動後も一致することを確認します。
-7. microSD未装着/書込み不能、無線使用不可、途中失敗、破損`.rgs`でクラッシュせず、Demoへ自動移行しないことを確認します。
-8. 保存・中断・アプリ終了後に標準Sub-GHzアプリが正常に使用できることを確認します。
+6. v5一覧の称号、季節装飾、5バンド情報、印影を確認し、再起動後も一致することを確認します。
+7. `Goshuin Book`で左右移動、端から端への循環、OKでの原寸表示、Backで帳面へ戻る動作を確認します。
+8. microSD未装着/書込み不能、無線使用不可、途中失敗、破損`.rgs`でクラッシュしないことを確認します。
+9. 保存・中断・アプリ終了後に標準Sub-GHzアプリが正常に使用できることを確認します。
 
 ## English
 
-Radio Goshuincho is a receive-only Flipper Zero app that turns RSSI observations into deterministic 128×64 travel seals. v0.4.0 adds seven distinct crest designs driven by RSSI features and a post-observation design selector. It never transmits, decodes protocols, or identifies emitters.
+Radio Goshuincho is a receive-only Flipper Zero app that turns RSSI observations into deterministic 128×64 travel seals. v0.5.0 adds a browsable goshuin book, four seasonal accents, and observation-driven collectible titles. It never transmits, decodes protocols, or identifies emitters.
 
 ### Modes
 
-- `5 Bands`: observes 315.000, 426.075, 429.350, 433.920, and 922.500 MHz (80 samples, about 12.25 seconds), then generates any of six v4 designs from that single observation.
+- `5 Bands`: observes five bands, then generates any of six seasonal v5 designs from that single observation.
 - `Real RF`: 433.920 MHz observation with the wheel/track design, saved as version 2.
 - `Demo`: deterministic dummy RSSI with the traditional square-seal design, saved as version 2.
-- `Saved Stamps`: reads versions 1 through 4 without rewriting older files or bitmaps.
+- `Goshuin Book`: browse downscaled saved seals with Left/Right and open one at full size with OK.
+- `Saved Stamps`: reads versions 1 through 5 without rewriting older files or bitmaps.
+
+The month selects spring blossoms, summer waves, autumn moon/leaves, or winter snowflakes. Band-local variation classifies each observation as Travel, Quiet, Spark, Storm, or Five Harmony. These are artistic descriptions of RSSI shape, not transmitter identification. Absolute RSSI is never ranked across bands.
+New Demo and Real RF bitmaps also receive seasonal and single-band feature marks while retaining their compatible v2 container.
+
+[Season comparison](previews/phase_e/seasons_comparison_8x.png) / [rarity comparison](previews/phase_e/rarities_comparison_8x.png)
+
+See the [Phase E collection notes](docs/PHASE_E_COLLECTION.md) for title rules, v5 validation, and book rendering details.
 
 The themes are: Demo square seal; 315 MHz keyhole/ripples; 426 MHz control panel/tower; 429 MHz gear/hexagon; 433 MHz wheel/tracks; 920 MHz network/constellation; and one cohesive five-crest integrated seal. Average strength is bucketed only inside each band's own motif, never used to rank bands. Range, relative high-sample ratio, peaks, turns, and time trend control geometry. Identical input always produces identical bits.
 
@@ -91,17 +119,18 @@ ufbt update --channel=release
 ufbt
 tests/run_host_tests.sh
 tests/generate_theme_previews.sh
+tests/generate_collectible_previews.sh
 ```
 
 The output is `dist/radio_goshuincho.fap`. Install with `ufbt launch` or copy it with qFlipper to `/ext/apps/Tools/radio_goshuincho.fap`. Records are stored in `/ext/apps_data/radio_goshuincho/`.
 
 ### 5 Bands controls
 
-Select `5 Bands`, enter a place, and wait for all 80 samples. Back cancels without saving or silently falling back to Demo. Press `Choose`, select the integrated design or one of five band themes, preview it, and press OK/`Save`. Back returns to the selector so another design can be saved from the same observation without receiving again. Left/Right cycles per-band metadata after saving; OK toggles metadata and seal. Existing files are never overwritten or migrated. Saved v1/v2/v3 bitmaps and the legacy v3 regeneration validator remain unchanged.
+Select `5 Bands`, enter a place, and wait for all 80 samples. Press `Choose`, select a design, preview it, and press OK/`Save`. The resulting v5 record includes deterministic season and rarity IDs. Back returns to the selector so another design can be saved without receiving again. Existing v1–v4 files remain unchanged.
 
-### Phase D device tests (not yet run)
+### Phase E device tests (not yet run)
 
-No Flipper Zero is attached to this cloud environment. On matching official Release firmware, verify Demo/Real and v1/v2/v3 regression; five-band order, timing, progress, and cancellation; all six post-observation choices; saving multiple designs without another RF run; v4 save/reboot/reload; radio and microSD failures without fallback; and normal standard Sub-GHz operation after cancellation or exit.
+No Flipper Zero is attached to this cloud environment. Verify v1–v4 regression, seasonal/rarity v5 save and reload, all Goshuin Book controls, multiple designs without another RF run, cancellation, microSD/radio failures, and normal standard Sub-GHz operation after exit.
 
 ## License
 

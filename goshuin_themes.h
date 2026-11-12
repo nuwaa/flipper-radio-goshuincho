@@ -18,6 +18,21 @@ typedef enum {
     GoshuinTheme920 = 6,
 } GoshuinThemeId;
 
+typedef enum {
+    GoshuinSeasonSpring = 1,
+    GoshuinSeasonSummer = 2,
+    GoshuinSeasonAutumn = 3,
+    GoshuinSeasonWinter = 4,
+} GoshuinSeasonId;
+
+typedef enum {
+    GoshuinRarityStandard = 0,
+    GoshuinRarityQuiet = 1,
+    GoshuinRaritySpark = 2,
+    GoshuinRarityStorm = 3,
+    GoshuinRarityHarmony = 4,
+} GoshuinRarityId;
+
 typedef struct {
     const int8_t* samples;
     size_t sample_count;
@@ -45,4 +60,15 @@ bool goshuin_theme_render(
     uint32_t seed,
     uint8_t* seal);
 const char* goshuin_theme_name(GoshuinThemeId theme);
+GoshuinSeasonId goshuin_theme_season_from_month(uint8_t month);
+GoshuinRarityId goshuin_theme_classify_rarity(
+    const GoshuinThemeBandInput* bands,
+    size_t band_count);
+bool goshuin_theme_apply_collectible(
+    uint8_t* seal,
+    GoshuinSeasonId season,
+    GoshuinRarityId rarity,
+    uint32_t seed);
+const char* goshuin_season_name(GoshuinSeasonId season);
+const char* goshuin_rarity_name(GoshuinRarityId rarity);
 

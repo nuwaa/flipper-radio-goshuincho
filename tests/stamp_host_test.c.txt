@@ -1,4 +1,5 @@
 #include "goshuin_multiband.h"
+#include "goshuin_collectible.h"
 #include "goshuin_stamp.h"
 #include "goshuin_themed.h"
 #include "goshuin_themes.h"
@@ -229,6 +230,125 @@ int main(void) {
         assert(goshuin_theme_render(theme, &weak_input, 1U, 0xCAFEU, weak_seal));
         assert(goshuin_theme_render(theme, &strong_input, 1U, 0xCAFEU, strong_seal));
         assert(memcmp(weak_seal, strong_seal, sizeof(weak_seal)));
+    }
+
+    assert(sizeof(GoshuinStampPayloadV5) == 1248U);
+    GoshuinStampPayloadV5 collectible;
+    assert(goshuin_collectible_create(&collectible, &multi, GoshuinThemeCombined));
+    assert(collectible.season_id == GoshuinSeasonAutumn);
+    assert(collectible.rarity_id == GoshuinRarityStandard);
+    GoshuinStampPayloadV5 collectible_decoded;
+    assert(goshuin_collectible_decode(
+        &collectible, sizeof(collectible), &collectible_decoded));
+    assert(!memcmp(&collectible, &collectible_decoded, sizeof(collectible)));
+    GoshuinStampPayloadV5 collectible_repeat;
+    assert(goshuin_collectible_create(
+        &collectible_repeat, &multi, GoshuinThemeCombined));
+    assert(!memcmp(&collectible, &collectible_repeat, sizeof(collectible)));
+    GoshuinStampPayloadV3 spring_observation = multi;
+    spring_observation.month = 4U;
+    spring_observation.measurement_status = GoshuinMeasurementStatusUnknown;
+    assert(goshuin_multiband_finalize(&spring_observation));
+    GoshuinStampPayloadV5 spring_collectible;
+    assert(goshuin_collectible_create(
+        &spring_collectible, &spring_observation, GoshuinThemeCombined));
+    assert(spring_collectible.season_id == GoshuinSeasonSpring);
+    assert(memcmp(spring_collectible.seal, collectible.seal, GOSHUIN_SEAL_BYTES));
+    GoshuinStampPayloadV5 quiet_collectible;
+    assert(goshuin_collectible_create(
+        &quiet_collectible, &flat_multi, GoshuinThemeCombined));
+    assert(quiet_collectible.rarity_id == GoshuinRarityQuiet);
+    GoshuinStampPayloadV3 storm_observation = multi;
+    for(size_t i = 0; i < GOSHUIN_MULTIBAND_COUNT; ++i)
+        memcpy(storm_observation.bands[i].rssi_samples, patterns[3], 16U);
+    storm_observation.measurement_status = GoshuinMeasurementStatusUnknown;
+    assert(goshuin_multiband_finalize(&storm_observation));
+    GoshuinStampPayloadV5 storm_collectible;
+    assert(goshuin_collectible_create(
+        &storm_collectible, &storm_observation, GoshuinThemeCombined));
+    assert(storm_collectible.rarity_id == GoshuinRarityStorm);
+    collectible_repeat.season_id = GoshuinSeasonWinter;
+    assert(!goshuin_collectible_decode(
+        &collectible_repeat, sizeof(collectible_repeat), &collectible_decoded));
+    collectible_repeat = collectible;
+    collectible_repeat.rarity_id = GoshuinRarityHarmony;
+    assert(!goshuin_collectible_decode(
+        &collectible_repeat, sizeof(collectible_repeat), &collectible_decoded));
+    collectible_repeat = collectible;
+    collectible_repeat.seal[321] ^= 1U;
+    assert(!goshuin_collectible_decode(
+        &collectible_repeat, sizeof(collectible_repeat), &collectible_decoded));
+
+    static const int8_t rising[16] = {
+        -110, -106, -102, -98, -94, -90, -86, -82,
+        -78, -74, -70, -66, -62, -58, -54, -50};
+    static const int8_t falling[16] = {
+        -50, -54, -58, -62, -66, -70, -74, -78,
+        -82, -86, -90, -94, -98, -102, -106, -110};
+    static const int8_t spark_pattern[16] = {
+        -100, -100, -100, -64, -100, -100, -100, -100,
+        -100, -100, -100, -62, -100, -100, -100, -100};
+    GoshuinThemeBandInput rarity_inputs[5];
+    for(size_t i = 0; i < 5U; ++i) {
+        rarity_inputs[i].samples = patterns[0];
+        rarity_inputs[i].sample_count = 16U;
+    }
+    assert(goshuin_theme_classify_rarity(rarity_inputs, 5U) == GoshuinRarityQuiet);
+    for(size_t i = 0; i < 5U; ++i)
+        rarity_inputs[i].samples = spark_pattern;
+    assert(goshuin_theme_classify_rarity(rarity_inputs, 5U) == GoshuinRaritySpark);
+    for(size_t i = 0; i < 5U; ++i)
+        rarity_inputs[i].samples = patterns[3];
+    assert(goshuin_theme_classify_rarity(rarity_inputs, 5U) == GoshuinRarityStorm);
+    rarity_inputs[0].samples = patterns[0];
+    rarity_inputs[1].samples = spark_pattern;
+    rarity_inputs[2].samples = patterns[3];
+    rarity_inputs[3].samples = rising;
+    rarity_inputs[4].samples = falling;
+    assert(goshuin_theme_classify_rarity(rarity_inputs, 5U) == GoshuinRarityHarmony);
+
+    assert(goshuin_theme_season_from_month(4U) == GoshuinSeasonSpring);
+    assert(goshuin_theme_season_from_month(7U) == GoshuinSeasonSummer);
+    assert(goshuin_theme_season_from_month(10U) == GoshuinSeasonAutumn);
+    assert(goshuin_theme_season_from_month(1U) == GoshuinSeasonWinter);
+    GoshuinThemeBandInput collectible_inputs[5];
+    for(size_t i = 0; i < 5U; ++i) {
+        collectible_inputs[i].samples = patterns[i % 4U];
+        collectible_inputs[i].sample_count = 16U;
+    }
+    uint8_t collectible_bitmaps[5][GOSHUIN_SEAL_BYTES];
+    for(GoshuinSeasonId season = GoshuinSeasonSpring; season <= GoshuinSeasonWinter; ++season) {
+        assert(goshuin_theme_render(
+            GoshuinThemeCombined,
+            collectible_inputs,
+            5U,
+            0x51515151U,
+            collectible_bitmaps[season - 1U]));
+        assert(goshuin_theme_apply_collectible(
+            collectible_bitmaps[season - 1U], season, GoshuinRarityStandard, 0x51515151U));
+        for(GoshuinSeasonId previous = GoshuinSeasonSpring; previous < season; ++previous) {
+            assert(memcmp(
+                collectible_bitmaps[previous - 1U],
+                collectible_bitmaps[season - 1U],
+                GOSHUIN_SEAL_BYTES));
+        }
+    }
+    for(GoshuinRarityId rarity = GoshuinRarityStandard; rarity <= GoshuinRarityHarmony;
+        ++rarity) {
+        assert(goshuin_theme_render(
+            GoshuinThemeCombined,
+            collectible_inputs,
+            5U,
+            0x62626262U,
+            collectible_bitmaps[rarity]));
+        assert(goshuin_theme_apply_collectible(
+            collectible_bitmaps[rarity], GoshuinSeasonAutumn, rarity, 0x62626262U));
+        for(GoshuinRarityId previous = GoshuinRarityStandard; previous < rarity; ++previous) {
+            assert(memcmp(
+                collectible_bitmaps[previous],
+                collectible_bitmaps[rarity],
+                GOSHUIN_SEAL_BYTES));
+        }
     }
     puts("stamp host tests: OK");
     return 0;
