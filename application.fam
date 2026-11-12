@@ -6,8 +6,8 @@ App(
     requires=["gui", "storage"],
     stack_size=8 * 1024,
     fap_category="Tools",
-    sources=["goshuin_stamp.c", "radio_goshuincho.c"],
+    sources=["goshuin_stamp.c", "goshuin_multiband.c", "radio_goshuincho.c"],
     fap_author="Radio Goshuincho contributors",
     fap_description="Create location stamps from receive-only Sub-GHz RSSI observations",
-    fap_version="0.2.1",
+    fap_version="0.3.0",
 )

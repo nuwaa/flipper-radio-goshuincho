@@ -1,3 +1,4 @@
+#include "goshuin_multiband.h"
 #include "goshuin_stamp.h"
 
 #include <assert.h>
@@ -55,6 +56,83 @@ int main(void) {
     assert(!goshuin_stamp_decode_payload(99U, &old, sizeof(old), &first));
     assert(!goshuin_stamp_decode_payload(1U, &old, sizeof(old) - 1U, &first));
     assert(goshuin_crc32("123456789", 9U) == 0xCBF43926U);
+
+    assert(sizeof(GoshuinBandPayloadV3) == 34U);
+    assert(sizeof(GoshuinStampPayloadV3) == 1244U);
+    const uint32_t quantized_hz[GOSHUIN_MULTIBAND_COUNT] = {
+        314999664U, 426074920U, 429349914U, 433919830U, 922499725U};
+    GoshuinStampPayloadV3 multi;
+    goshuin_multiband_initialize(&multi, "Five-Bands", &date, 150U, 50U, 50U);
+    for(size_t band_index = 0; band_index < GOSHUIN_MULTIBAND_COUNT; ++band_index) {
+        GoshuinBandPayloadV3* band = &multi.bands[band_index];
+        band->actual_frequency_hz = quantized_hz[band_index];
+        band->valid_count = GOSHUIN_MULTIBAND_SAMPLES;
+        band->valid_mask = GOSHUIN_MULTIBAND_VALID_MASK;
+        for(size_t sample = 0; sample < GOSHUIN_MULTIBAND_SAMPLES; ++sample) {
+            band->rssi_samples[sample] =
+                (int8_t)(-110 + (int32_t)band_index * 5 + (int32_t)sample);
+        }
+    }
+    assert(goshuin_multiband_finalize(&multi));
+    GoshuinStampPayloadV3 multi_decoded;
+    assert(goshuin_multiband_decode(&multi, sizeof(multi), &multi_decoded));
+    assert(!memcmp(&multi, &multi_decoded, sizeof(multi)));
+
+    GoshuinStampPayloadV3 changed = multi;
+    changed.bands[2].rssi_samples[7]++;
+    changed.measurement_status = GoshuinMeasurementStatusUnknown;
+    assert(goshuin_multiband_finalize(&changed));
+    assert(changed.seed != multi.seed);
+    assert(memcmp(changed.seal, multi.seal, sizeof(multi.seal)));
+
+    GoshuinStampPayloadV3 reordered = multi;
+    GoshuinBandPayloadV3 swap_band = reordered.bands[0];
+    reordered.bands[0] = reordered.bands[1];
+    reordered.bands[1] = swap_band;
+    reordered.measurement_status = GoshuinMeasurementStatusUnknown;
+    assert(goshuin_multiband_finalize(&reordered));
+    assert(reordered.seed != multi.seed);
+
+    GoshuinStampPayloadV3 weak_band = multi;
+    memset(weak_band.bands[4].rssi_samples, -127, sizeof(weak_band.bands[4].rssi_samples));
+    weak_band.measurement_status = GoshuinMeasurementStatusUnknown;
+    assert(goshuin_multiband_finalize(&weak_band));
+    assert(weak_band.seed != multi.seed);
+
+    GoshuinStampPayloadV3 flat_multi;
+    goshuin_multiband_initialize(&flat_multi, "Quiet", &date, 150U, 50U, 50U);
+    for(size_t band_index = 0; band_index < GOSHUIN_MULTIBAND_COUNT; ++band_index) {
+        GoshuinBandPayloadV3* band = &flat_multi.bands[band_index];
+        band->actual_frequency_hz = quantized_hz[band_index];
+        band->valid_count = GOSHUIN_MULTIBAND_SAMPLES;
+        band->valid_mask = GOSHUIN_MULTIBAND_VALID_MASK;
+        memset(band->rssi_samples, -127, sizeof(band->rssi_samples));
+    }
+    assert(goshuin_multiband_finalize(&flat_multi));
+
+    GoshuinStampPayloadV3 invalid = multi;
+    invalid.band_count = 4U;
+    assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
+    invalid = multi;
+    invalid.bands[4].valid_count--;
+    assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
+    invalid = multi;
+    invalid.bands[1].band_id = invalid.bands[0].band_id;
+    assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
+    invalid = multi;
+    invalid.bands[3].actual_frequency_hz -= 5000U;
+    assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
+    invalid = multi;
+    invalid.measurement_status = GoshuinMeasurementStatusFailed;
+    assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
+    invalid = multi;
+    invalid.location[12] = 'X';
+    assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
+    assert(!goshuin_multiband_decode(&multi, sizeof(multi) - 1U, &multi_decoded));
+    invalid = multi;
+    invalid.seal[10] ^= 1U;
+    assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
+    assert(goshuin_crc32(&multi, sizeof(multi)) != goshuin_crc32(&invalid, sizeof(invalid)));
     puts("stamp host tests: OK");
     return 0;
 }

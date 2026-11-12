@@ -2,22 +2,18 @@
 
 ## 日本語
 
-Radio Goshuincho（電波御朱印帳）は、Flipper Zero内蔵Sub-GHz受信機で観測したRSSI（受信信号強度）から、場所と日時に結び付いた128×64モノクロ印章を作る外部アプリです。Phase B v0.2.1は受信専用です。送信APIや信号源を特定する機能は実装していません。
+Radio Goshuincho（電波御朱印帳）は、Flipper Zero内蔵Sub-GHz受信機で観測したRSSIから、場所と日時に結び付いた128×64モノクロ印章を作る受信専用アプリです。v0.3.0では5つの固定中心周波数を順番に観測する`5 Bands`を追加しました。送信、プロトコルデコード、発信源の識別は行いません。
 
-### Phase Bの機能
+### モード
 
-- `Real RF`: 433.92 MHzを10秒間、200 ms間隔で50回観測
-- 周波数、現在RSSI、経過時間、進捗、簡易グラフの表示
-- Backによる安全な中断と、失敗時の明示（Demoへの自動切替なし）
-- `Demo`: Phase Aと同様の決定的なダミーRSSI
-- 場所、RTC日時、RSSI列、統計、周波数、測定種別から決定的な印章を生成
-- CRC32付きmicroSD保存、一覧、再表示
-- Phase A形式version 1の`.rgs`を読込み、新規データはversion 2で保存
-- 同名レコードには連番を付け、既存ファイルを上書きしない
+- `5 Bands`: 315.000 / 426.075 / 429.350 / 433.920 / 922.500 MHzを順次観測。各バンド16窓、各150 ms窓内で50 msごとに3回RSSIを読み、ピーク値を保存（合計80サンプル、約12.25秒）
+- `Real RF`: Phase B互換。433.920 MHzを200 ms間隔×50回（約10秒）観測し、version 2で保存
+- `Demo`: 決定的なダミーRSSIを生成し、version 2で保存
+- `Saved Stamps`: version 1/2/3を一覧・再表示。`5B`、`R`、`D`で測定種別を区別
 
-RSSIは受信帯域内の総合的な強度指標です。特定送信機の存在・識別、通信内容、または電波が存在しないことを判定するものではありません。
+RSSIは受信フィルタ帯域内の強度指標です。特定機器の存在、通信内容、または電波が存在しないことを断定できません。アンテナやフロントエンドの感度が帯域ごとに異なるため、異なるバンドの値を単純比較しないでください。
 
-### ビルド
+### ビルドとインストール
 
 公式Releaseファームウェア、Python 3.8以上、公式[uFBT](https://github.com/flipperdevices/flipperzero-ufbt)、保存用microSDが必要です。
 
@@ -30,50 +26,45 @@ ufbt
 tests/run_host_tests.sh
 ```
 
-FAPは`dist/radio_goshuincho.fap`に生成されます。USBなら`ufbt launch`、qFlipperならmicroSDの`/ext/apps/Tools/radio_goshuincho.fap`へコピーします。本体とSDKのRelease世代を合わせてください。
+FAPは`dist/radio_goshuincho.fap`に生成されます。USBなら`ufbt launch`、qFlipperなら`/ext/apps/Tools/radio_goshuincho.fap`へコピーします。本体とSDKのRelease世代を合わせてください。保存先は`/ext/apps_data/radio_goshuincho/`です。
 
-### 操作
+### 5 Bandsの操作
 
-1. `Real RF`または`Demo`を選び、英数字・空白・ハイフンで場所名を入力します。
-2. Real RFでは10秒待ちます。Backで中断できます。完了後に`Create`を押すと生成・保存します。
-3. Demoでは確定直後に生成・保存します。
-4. 情報画面の`Seal`（OK）で印章と情報を切り替えます。
-5. `Saved Stamps`では`R`（Real RF）/`D`（Demo）付き一覧から再表示します。
+1. `5 Bands`を選び、英数字・空白・ハイフンで場所名を入力します。
+2. 5バンドが順次表示されます。Backで中断できます。中断・失敗データは保存されず、Demoへ自動切替しません。
+3. 80サンプル完了後に`Create+Save`を押します。この操作で決定的な印章をmicroSDへ保存します。
+4. 情報画面で左右キーを使うと各バンドの実設定周波数、サンプル数、min/avg/maxを切り替えられます。OKで情報と印章を切り替えます。
 
-保存先は`/ext/apps_data/radio_goshuincho/`です。
+既存ファイルは上書き・変換しません。同名時は連番を付けます。v1/v2の保存済みbitmapは再生成せず、そのまま表示します。
 
-### Phase B実機テスト手順（未実施）
+### Phase C実機テスト手順（未実施）
 
-このクラウド環境にはFlipper Zeroが接続されていないため、以下は実機で行う必要があります。
+このクラウド環境にはFlipper Zeroが接続されていないため、次を実機で確認してください。
 
-1. 公式Releaseファームウェアの本体とmicroSDへv0.2.1を導入し、`About`の`RX only`と版を確認します。
-2. Demoの生成・保存・一覧・再表示を確認します。
-3. Phase A v0.1.4の`.rgs`を残し、`Saved Stamps`から開けることを確認します。
-4. Real RFで433.92 MHz、RSSI、時間、グラフ、進捗が更新されることを確認します。
-5. 測定中にBackを押し、取消表示後に戻れることと、他のSub-GHzアプリが使えることを確認します。
-6. Real RFを完了し、`Create`後に50 samples、印章、保存一覧を確認します。
-7. microSD未装着/書込み不能でエラー表示を確認します。
-8. `.rgs`を1 byte変更し、破損レコードが一覧から除外されることを確認します。
-9. 無線リソースを利用できない状況でエラーになり、Demoへ自動移行しないことを確認します。
+1. 公式ReleaseファームウェアとmicroSDへv0.3.0を導入し、`About`の版と`RX only`を確認します。
+2. 既存のDemo、Real RF、v1/v2保存印章の一覧・再表示が維持されていることを確認します。
+3. `5 Bands`を開始し、315→426→429→433→920 MHzの順、各16サンプル、全体80サンプル、グラフとUI応答を確認します。
+4. 測定中にBackで中断し、取消表示後に戻れること、その後に標準Sub-GHzアプリが使えることを確認します。
+5. 完了後に`Create+Save`を押し、`5B`一覧、5バンド情報、印章を確認します。再起動後も一致することを確認します。
+6. microSD未装着/書込み不能、無線使用不可、途中失敗、破損`.rgs`でクラッシュせず、Demoへ自動移行しないことを確認します。
+7. 各requested Hzとactual Hz、総所要時間、帯域別のRSSI偏り、短パルス取り逃がしを記録します。
 
 ## English
 
-Radio Goshuincho turns RSSI observations from Flipper Zero's built-in Sub-GHz receiver into a deterministic 128×64 travel seal tied to a place and time. Phase B v0.2.1 is receive-only: it has no transmit API calls and does not identify signal sources.
+Radio Goshuincho is a receive-only Flipper Zero app that turns RSSI observations into deterministic 128×64 travel seals. v0.3.0 adds `5 Bands`, which sequentially observes five fixed center frequencies. It never transmits, decodes protocols, or identifies emitters.
 
-### Phase B features
+### Modes
 
-- `Real RF`: observe 433.92 MHz for 10 seconds at 200 ms intervals (50 samples)
-- Live frequency, RSSI, elapsed time, progress, and compact graph
-- Safe Back cancellation and explicit errors; no silent Demo fallback
-- Deterministic `Demo` mode, seal generation, and CRC32-protected microSD persistence
-- Phase A version 1 `.rgs` compatibility; new extended version 2 records
-- Collision suffixes prevent overwriting existing records
+- `5 Bands`: sequentially observe 315.000, 426.075, 429.350, 433.920, and 922.500 MHz. Each band has sixteen 150 ms windows; three 50 ms RSSI reads produce one peak per window (80 samples, about 12.25 seconds).
+- `Real RF`: unchanged Phase B 433.920 MHz observation, 50 samples at 200 ms, saved as version 2.
+- `Demo`: deterministic dummy RSSI, saved as version 2.
+- `Saved Stamps`: reads versions 1, 2, and 3; list labels distinguish `5B`, `R`, and `D`.
 
-RSSI is an aggregate strength indication in the receiver bandwidth. It cannot prove the identity or presence of a transmitter, reveal content, or establish that no radio energy exists.
+RSSI is a strength indication inside the receiver filter bandwidth. It cannot establish transmitter identity, content, or the absence of radio energy. Different bands have different antenna/front-end sensitivity and should not be compared as equal measurements.
 
 ### Build and install
 
-Use official Release firmware, Python 3.8+, official uFBT, and a microSD card:
+Use matching official Release firmware, Python 3.8+, official uFBT, and a microSD card:
 
 ```sh
 python3 -m venv .venv-ufbt
@@ -84,15 +75,15 @@ ufbt
 tests/run_host_tests.sh
 ```
 
-The output is `dist/radio_goshuincho.fap`. Install with `ufbt launch`, or copy it with qFlipper to `/ext/apps/Tools/radio_goshuincho.fap`. Match the device firmware and SDK Release generation. Records live in `/ext/apps_data/radio_goshuincho/`.
+The output is `dist/radio_goshuincho.fap`. Install with `ufbt launch` or copy it with qFlipper to `/ext/apps/Tools/radio_goshuincho.fap`. Records are stored in `/ext/apps_data/radio_goshuincho/`.
 
-### Controls
+### 5 Bands controls
 
-Choose `Real RF` or `Demo` and enter a place. Real RF runs for ten seconds and can be cancelled with Back; press `Create` after completion. Demo generates immediately. Use `Seal`/OK to toggle the seal, and `Saved Stamps` to reopen `R` (real) or `D` (demo) records.
+Select `5 Bands`, enter a place, and wait for all 80 samples. Back cancels without saving or silently falling back to Demo. After completion, `Create+Save` generates and writes the seal. Left/Right cycles through per-band actual frequency and statistics; OK toggles metadata and seal. Existing files are never overwritten or migrated, and saved v1/v2 bitmaps are displayed unchanged.
 
-### Phase B device tests (not yet run)
+### Phase C device tests (not yet run)
 
-No Flipper Zero is attached to this cloud environment. On matching official Release firmware, verify About/version, Demo save/reload, Phase A record loading, live Real RF progress, Back cancellation and later use by another Sub-GHz app, completed 50-sample save, microSD failures, corrupted-record rejection, and explicit radio-resource failure without Demo fallback.
+No Flipper Zero is attached to this cloud environment. On matching official Release firmware, verify the v0.2.1 Demo/Real/v1/v2 regression path; five-band order, timing, progress, and sample counts; Back cancellation and later standard Sub-GHz use; v3 save/reboot/reload; radio and microSD failures without fallback; requested-versus-actual frequencies; and real antenna sensitivity/pulse-capture limitations.
 
 ## License
 

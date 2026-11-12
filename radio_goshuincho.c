@@ -1,3 +1,4 @@
+#include "goshuin_multiband.h"
 #include "goshuin_stamp.h"
 
 #include <furi.h>
@@ -8,23 +9,29 @@
 #include <gui/modules/text_input.h>
 #include <gui/view.h>
 #include <gui/view_dispatcher.h>
-#include <storage/storage.h>
 #include <lib/subghz/devices/cc1101_int/cc1101_int_interconnect.h>
 #include <lib/subghz/devices/devices.h>
 #include <lib/subghz/devices/preset.h>
+#include <storage/storage.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define GOSHUIN_FILE_MAGIC        "RGSF"
-#define GOSHUIN_MAX_SAVED_STAMPS  32U
-#define GOSHUIN_PATH_CAPACITY     96U
-#define GOSHUIN_FILENAME_CAPACITY 80U
-#define GOSHUIN_LABEL_CAPACITY    56U
-#define GOSHUIN_RF_FREQUENCY_HZ   433920000UL
-#define GOSHUIN_RF_INTERVAL_MS    200U
-#define GOSHUIN_RF_SAMPLE_COUNT   50U
+#define GOSHUIN_FILE_MAGIC             "RGSF"
+#define GOSHUIN_MAX_SAVED_STAMPS       32U
+#define GOSHUIN_PATH_CAPACITY          96U
+#define GOSHUIN_FILENAME_CAPACITY      80U
+#define GOSHUIN_LABEL_CAPACITY         56U
+#define GOSHUIN_RF_FREQUENCY_HZ        433920000UL
+#define GOSHUIN_RF_INTERVAL_MS         200U
+#define GOSHUIN_RF_SAMPLE_COUNT        50U
+#define GOSHUIN_TICK_MS                50U
+#define GOSHUIN_LEGACY_TICK_DIVIDER    (GOSHUIN_RF_INTERVAL_MS / GOSHUIN_TICK_MS)
+#define GOSHUIN_MULTI_WINDOW_MS        150U
+#define GOSHUIN_MULTI_SETTLE_MS        50U
+#define GOSHUIN_MULTI_READS_PER_WINDOW (GOSHUIN_MULTI_WINDOW_MS / GOSHUIN_TICK_MS)
+#define GOSHUIN_FREQUENCY_TOLERANCE_HZ 1000U
 
 typedef struct __attribute__((packed)) {
     uint8_t magic[4];
@@ -40,14 +47,22 @@ typedef enum {
     GoshuinViewSaved,
     GoshuinViewDisplay,
     GoshuinViewMeasure,
+    GoshuinViewMultiMeasure,
 } GoshuinViewId;
 
 typedef enum {
+    GoshuinMainMulti,
     GoshuinMainReal,
     GoshuinMainDemo,
     GoshuinMainSaved,
     GoshuinMainAbout,
 } GoshuinMainItem;
+
+typedef enum {
+    GoshuinModeDemo,
+    GoshuinModeReal,
+    GoshuinModeMulti,
+} GoshuinMode;
 
 typedef enum {
     GoshuinCustomLocationDone = 1,
@@ -74,10 +89,18 @@ typedef enum {
 } GoshuinMeasureState;
 
 typedef struct {
+    uint16_t format_version;
+    union {
+        GoshuinStampPayload legacy;
+        GoshuinStampPayloadV3 multiband;
+    } payload;
+} GoshuinRecord;
+
+typedef struct {
     GoshuinDisplayMode mode;
     bool show_info;
-    bool saved;
-    GoshuinStampPayload stamp;
+    uint8_t band_page;
+    GoshuinRecord record;
     char message[64];
 } GoshuinDisplayModel;
 
@@ -90,24 +113,40 @@ typedef struct {
 } GoshuinMeasureModel;
 
 typedef struct {
+    GoshuinMeasureState state;
+    uint8_t band_index;
+    uint8_t band_sample_count;
+    uint8_t total_sample_count;
+    uint32_t actual_frequency_hz;
+    int8_t current_rssi;
+    int8_t samples[GOSHUIN_MULTIBAND_SAMPLES];
+    char message[32];
+} GoshuinMultiMeasureModel;
+
+typedef struct {
     ViewDispatcher* view_dispatcher;
     Submenu* main_menu;
     Submenu* saved_menu;
     TextInput* text_input;
     View* display_view;
     View* measure_view;
+    View* multi_measure_view;
     Storage* storage;
     GoshuinViewId current_view;
     GoshuinReturnTarget display_return;
-    GoshuinMeasurementSource pending_source;
+    GoshuinMode pending_mode;
     char location[GOSHUIN_LOCATION_CAPACITY];
     char saved_paths[GOSHUIN_MAX_SAVED_STAMPS][GOSHUIN_PATH_CAPACITY];
     char saved_labels[GOSHUIN_MAX_SAVED_STAMPS][GOSHUIN_LABEL_CAPACITY];
     size_t saved_count;
     size_t pending_saved_index;
-    GoshuinStampPayload working_stamp;
+    GoshuinRecord working_record;
     DateTime measurement_datetime;
     uint32_t measurement_frequency_hz;
+    uint8_t legacy_tick_count;
+    uint8_t multi_read_count;
+    int8_t multi_peak_rssi;
+    bool multi_settling;
     const SubGhzDevice* radio;
     bool devices_initialized;
     bool radio_begun;
@@ -125,33 +164,42 @@ static bool has_suffix(const char* text, const char* suffix) {
     return (text_length >= suffix_length) && !strcmp(text + text_length - suffix_length, suffix);
 }
 
-static bool stamp_write(
+static bool write_payload(
     RadioGoshuinchoApp* app,
-    const GoshuinStampPayload* stamp,
+    uint16_t version,
+    const void* payload,
+    size_t payload_size,
+    uint16_t year,
+    uint8_t month,
+    uint8_t day,
+    uint8_t hour,
+    uint8_t minute,
+    uint8_t second,
+    uint32_t seed,
     char* output_path,
     size_t output_size) {
     GoshuinFileHeader header = {
         .magic = GOSHUIN_FILE_MAGIC,
-        .format_version = GOSHUIN_FILE_VERSION_CURRENT,
+        .format_version = version,
         .header_size = sizeof(GoshuinFileHeader),
-        .payload_size = sizeof(GoshuinStampPayload),
-        .payload_crc32 = goshuin_crc32(stamp, sizeof(*stamp)),
+        .payload_size = payload_size,
+        .payload_crc32 = goshuin_crc32(payload, payload_size),
     };
     char stem[72];
     snprintf(
         stem,
         sizeof(stem),
         "stamp_%04u%02u%02u_%02u%02u%02u_%08lx",
-        stamp->year,
-        stamp->month,
-        stamp->day,
-        stamp->hour,
-        stamp->minute,
-        stamp->second,
-        (unsigned long)stamp->seed);
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        (unsigned long)seed);
     bool available = false;
     for(uint32_t suffix = 0; suffix < 100U; ++suffix) {
-        if(suffix == 0U) {
+        if(!suffix) {
             snprintf(output_path, output_size, APP_DATA_PATH("%s.rgs"), stem);
         } else {
             snprintf(
@@ -171,17 +219,61 @@ static bool stamp_write(
     File* file = storage_file_alloc(app->storage);
     bool success = storage_file_open(file, output_path, FSAM_WRITE, FSOM_CREATE_NEW);
     if(success) success = storage_file_write(file, &header, sizeof(header)) == sizeof(header);
-    if(success) success = storage_file_write(file, stamp, sizeof(*stamp)) == sizeof(*stamp);
+    if(success) success = storage_file_write(file, payload, payload_size) == payload_size;
     storage_file_close(file);
     storage_file_free(file);
     return success;
 }
 
-static bool stamp_read(RadioGoshuinchoApp* app, const char* path, GoshuinStampPayload* stamp) {
+static bool write_legacy_stamp(
+    RadioGoshuinchoApp* app,
+    const GoshuinStampPayload* stamp,
+    char* output_path,
+    size_t output_size) {
+    return write_payload(
+        app,
+        GOSHUIN_FILE_VERSION_CURRENT,
+        stamp,
+        sizeof(*stamp),
+        stamp->year,
+        stamp->month,
+        stamp->day,
+        stamp->hour,
+        stamp->minute,
+        stamp->second,
+        stamp->seed,
+        output_path,
+        output_size);
+}
+
+static bool write_multiband_stamp(
+    RadioGoshuinchoApp* app,
+    const GoshuinStampPayloadV3* stamp,
+    char* output_path,
+    size_t output_size) {
+    return write_payload(
+        app,
+        GOSHUIN_FILE_VERSION_V3,
+        stamp,
+        sizeof(*stamp),
+        stamp->year,
+        stamp->month,
+        stamp->day,
+        stamp->hour,
+        stamp->minute,
+        stamp->second,
+        stamp->seed,
+        output_path,
+        output_size);
+}
+
+static bool read_record(RadioGoshuinchoApp* app, const char* path, GoshuinRecord* record) {
+    memset(record, 0, sizeof(*record));
     GoshuinFileHeader header;
     union {
         GoshuinStampPayloadV1 v1;
         GoshuinStampPayload v2;
+        GoshuinStampPayloadV3 v3;
     } payload;
     File* file = storage_file_alloc(app->storage);
     bool success = storage_file_open(file, path, FSAM_READ, FSOM_OPEN_EXISTING);
@@ -192,25 +284,31 @@ static bool stamp_read(RadioGoshuinchoApp* app, const char* path, GoshuinStampPa
                   (((header.format_version == GOSHUIN_FILE_VERSION_V1) &&
                     (header.payload_size == sizeof(GoshuinStampPayloadV1))) ||
                    ((header.format_version == GOSHUIN_FILE_VERSION_CURRENT) &&
-                    (header.payload_size == sizeof(GoshuinStampPayload))));
+                    (header.payload_size == sizeof(GoshuinStampPayload))) ||
+                   ((header.format_version == GOSHUIN_FILE_VERSION_V3) &&
+                    (header.payload_size == sizeof(GoshuinStampPayloadV3))));
     }
-    if(success) {
+    if(success)
         success = storage_file_read(file, &payload, header.payload_size) == header.payload_size;
-    }
     storage_file_close(file);
     storage_file_free(file);
     if(success) success = header.payload_crc32 == goshuin_crc32(&payload, header.payload_size);
     if(success) {
-        success = goshuin_stamp_decode_payload(
-            header.format_version, &payload, header.payload_size, stamp);
+        record->format_version = header.format_version;
+        if(header.format_version == GOSHUIN_FILE_VERSION_V3) {
+            success = goshuin_multiband_decode(
+                &payload, header.payload_size, &record->payload.multiband);
+        } else {
+            success = goshuin_stamp_decode_payload(
+                header.format_version, &payload, header.payload_size, &record->payload.legacy);
+        }
     }
     return success;
 }
 
-static void display_stamp(
+static void display_record(
     RadioGoshuinchoApp* app,
-    const GoshuinStampPayload* stamp,
-    bool saved,
+    const GoshuinRecord* record,
     GoshuinReturnTarget target) {
     app->display_return = target;
     with_view_model(
@@ -219,8 +317,8 @@ static void display_stamp(
         {
             model->mode = GoshuinDisplayStamp;
             model->show_info = true;
-            model->saved = saved;
-            model->stamp = *stamp;
+            model->band_page = 0;
+            model->record = *record;
             model->message[0] = '\0';
         },
         true);
@@ -239,7 +337,6 @@ static void display_message(
         {
             model->mode = mode;
             model->show_info = true;
-            model->saved = false;
             strncpy(model->message, message, sizeof(model->message) - 1U);
             model->message[sizeof(model->message) - 1U] = '\0';
         },
@@ -254,10 +351,10 @@ static void display_draw(Canvas* canvas, void* context) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 9, AlignCenter, AlignBottom, "Radio Goshuincho");
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 3, 22, "Phase B - RX only");
-        canvas_draw_str(canvas, 3, 32, "Real RF + Demo RSSI");
+        canvas_draw_str(canvas, 3, 22, "Phase C - RX only");
+        canvas_draw_str(canvas, 3, 32, "5 Bands + Real + Demo");
         canvas_draw_str(canvas, 3, 42, "No Sub-GHz TX capability");
-        canvas_draw_str(canvas, 3, 52, "Version 0.2.1 / microSD");
+        canvas_draw_str(canvas, 3, 52, "Version 0.3.0 / microSD");
         elements_button_left(canvas, "Back");
         return;
     }
@@ -269,49 +366,104 @@ static void display_draw(Canvas* canvas, void* context) {
         elements_button_left(canvas, "Back");
         return;
     }
+
+    const bool multiband = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
+    const uint8_t* seal = multiband ? model->record.payload.multiband.seal :
+                                      model->record.payload.legacy.seal;
     if(!model->show_info) {
-        canvas_draw_xbm(canvas, 0, 0, GOSHUIN_SEAL_WIDTH, GOSHUIN_SEAL_HEIGHT, model->stamp.seal);
+        canvas_draw_xbm(canvas, 0, 0, GOSHUIN_SEAL_WIDTH, GOSHUIN_SEAL_HEIGHT, seal);
         return;
     }
+
     char line[48];
+    char title[24];
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str_aligned(canvas, 64, 9, AlignCenter, AlignBottom, "Radio Goshuincho");
+    if(multiband) {
+        snprintf(
+            title,
+            sizeof(title),
+            "5-Band %u",
+            model->record.payload.multiband.bands[model->band_page].band_id);
+    } else {
+        strcpy(title, "Radio Goshuincho");
+    }
+    canvas_draw_str_aligned(canvas, 64, 9, AlignCenter, AlignBottom, title);
     canvas_set_font(canvas, FontSecondary);
-    snprintf(line, sizeof(line), "Place: %s", model->stamp.location);
-    canvas_draw_str(canvas, 2, 20, line);
-    snprintf(
-        line,
-        sizeof(line),
-        "%04u-%02u-%02u %02u:%02u:%02u",
-        model->stamp.year,
-        model->stamp.month,
-        model->stamp.day,
-        model->stamp.hour,
-        model->stamp.minute,
-        model->stamp.second);
-    canvas_draw_str(canvas, 2, 31, line);
-    snprintf(
-        line,
-        sizeof(line),
-        "RSSI %d avg  %d..%d dBm",
-        model->stamp.rssi_average,
-        model->stamp.rssi_min,
-        model->stamp.rssi_max);
-    canvas_draw_str(canvas, 2, 42, line);
-    if(model->stamp.measurement_source == GoshuinMeasurementSubGhzReceive) {
-        const uint32_t frequency_hundredths = (model->stamp.frequency_hz + 5000UL) / 10000UL;
+    if(multiband) {
+        const GoshuinStampPayloadV3* stamp = &model->record.payload.multiband;
+        const GoshuinBandPayloadV3* band = &stamp->bands[model->band_page];
+        snprintf(line, sizeof(line), "Place: %s", stamp->location);
+        canvas_draw_str(canvas, 2, 20, line);
         snprintf(
             line,
             sizeof(line),
-            "Real %lu.%02luMHz / %u",
-            (unsigned long)(frequency_hundredths / 100UL),
-            (unsigned long)(frequency_hundredths % 100UL),
-            model->stamp.sample_count);
+            "%04u-%02u-%02u %02u:%02u:%02u",
+            stamp->year,
+            stamp->month,
+            stamp->day,
+            stamp->hour,
+            stamp->minute,
+            stamp->second);
+        canvas_draw_str(canvas, 2, 31, line);
+        const uint32_t thousandths = (band->actual_frequency_hz + 500UL) / 1000UL;
+        snprintf(
+            line,
+            sizeof(line),
+            "%lu.%03luMHz %u/%u",
+            (unsigned long)(thousandths / 1000UL),
+            (unsigned long)(thousandths % 1000UL),
+            band->valid_count,
+            GOSHUIN_MULTIBAND_SAMPLES);
+        canvas_draw_str(canvas, 2, 42, line);
+        snprintf(
+            line,
+            sizeof(line),
+            "RSSI %d avg  %d..%d",
+            band->rssi_average,
+            band->rssi_min,
+            band->rssi_max);
+        canvas_draw_str(canvas, 2, 52, line);
+        elements_button_left(canvas, "Prev");
+        elements_button_center(canvas, "Seal");
+        elements_button_right(canvas, "Next");
     } else {
-        snprintf(line, sizeof(line), "Demo / %u samples", model->stamp.sample_count);
+        const GoshuinStampPayload* stamp = &model->record.payload.legacy;
+        snprintf(line, sizeof(line), "Place: %s", stamp->location);
+        canvas_draw_str(canvas, 2, 20, line);
+        snprintf(
+            line,
+            sizeof(line),
+            "%04u-%02u-%02u %02u:%02u:%02u",
+            stamp->year,
+            stamp->month,
+            stamp->day,
+            stamp->hour,
+            stamp->minute,
+            stamp->second);
+        canvas_draw_str(canvas, 2, 31, line);
+        snprintf(
+            line,
+            sizeof(line),
+            "RSSI %d avg  %d..%d dBm",
+            stamp->rssi_average,
+            stamp->rssi_min,
+            stamp->rssi_max);
+        canvas_draw_str(canvas, 2, 42, line);
+        if(stamp->measurement_source == GoshuinMeasurementSubGhzReceive) {
+            const uint32_t hundredths = (stamp->frequency_hz + 5000UL) / 10000UL;
+            snprintf(
+                line,
+                sizeof(line),
+                "Real %lu.%02luMHz / %u",
+                (unsigned long)(hundredths / 100UL),
+                (unsigned long)(hundredths % 100UL),
+                stamp->sample_count);
+        } else {
+            snprintf(line, sizeof(line), "Demo / %u samples", stamp->sample_count);
+        }
+        canvas_draw_str(canvas, 2, 52, line);
+        elements_button_center(canvas, "Seal");
     }
-    canvas_draw_str(canvas, 2, 52, line);
-    elements_button_center(canvas, "Seal");
 }
 
 static bool display_input(InputEvent* event, void* context) {
@@ -322,18 +474,27 @@ static bool display_input(InputEvent* event, void* context) {
             app, app->display_return == GoshuinReturnSaved ? GoshuinViewSaved : GoshuinViewMain);
         return true;
     }
-    if((event->key == InputKeyLeft) || (event->key == InputKeyRight) ||
-       (event->key == InputKeyOk)) {
-        with_view_model(
-            app->display_view,
-            GoshuinDisplayModel * model,
-            {
-                if(model->mode == GoshuinDisplayStamp) model->show_info = !model->show_info;
-            },
-            true);
-        return true;
-    }
-    return false;
+    with_view_model(
+        app->display_view,
+        GoshuinDisplayModel * model,
+        {
+            if(model->mode == GoshuinDisplayStamp) {
+                const bool multiband = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
+                if(event->key == InputKeyOk) {
+                    model->show_info = !model->show_info;
+                } else if(multiband && model->show_info && (event->key == InputKeyLeft)) {
+                    model->band_page = model->band_page ? model->band_page - 1U :
+                                                          GOSHUIN_MULTIBAND_COUNT - 1U;
+                } else if(multiband && model->show_info && (event->key == InputKeyRight)) {
+                    model->band_page = (model->band_page + 1U) % GOSHUIN_MULTIBAND_COUNT;
+                } else if((event->key == InputKeyLeft) || (event->key == InputKeyRight)) {
+                    model->show_info = !model->show_info;
+                }
+            }
+        },
+        true);
+    return (event->key == InputKeyOk) || (event->key == InputKeyLeft) ||
+           (event->key == InputKeyRight);
 }
 
 static void radio_release(RadioGoshuinchoApp* app) {
@@ -353,6 +514,44 @@ static void radio_release(RadioGoshuinchoApp* app) {
     }
 }
 
+static bool radio_acquire(RadioGoshuinchoApp* app) {
+    subghz_devices_init();
+    app->devices_initialized = true;
+    app->radio = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+    if(!app->radio) return false;
+    subghz_devices_begin(app->radio);
+    app->radio_begun = true;
+    subghz_devices_reset(app->radio);
+    subghz_devices_idle(app->radio);
+    return true;
+}
+
+static bool radio_tune_rx(RadioGoshuinchoApp* app, uint32_t requested_hz, uint32_t* actual_hz) {
+    if(!app->radio || !subghz_devices_is_frequency_valid(app->radio, requested_hz)) return false;
+    if(app->radio_receiving) {
+        subghz_devices_idle(app->radio);
+        app->radio_receiving = false;
+    }
+    subghz_devices_load_preset(app->radio, FuriHalSubGhzPresetOok650Async, NULL);
+    const uint32_t actual = subghz_devices_set_frequency(app->radio, requested_hz);
+    if(!subghz_devices_is_frequency_valid(app->radio, actual)) return false;
+    const uint32_t difference = requested_hz > actual ? requested_hz - actual :
+                                                        actual - requested_hz;
+    if(difference > GOSHUIN_FREQUENCY_TOLERANCE_HZ) return false;
+    subghz_devices_flush_rx(app->radio);
+    subghz_devices_set_rx(app->radio);
+    app->radio_receiving = true;
+    *actual_hz = actual;
+    return true;
+}
+
+static int8_t radio_read_rssi(RadioGoshuinchoApp* app) {
+    float raw = subghz_devices_get_rssi(app->radio);
+    if(raw < -127.0f) raw = -127.0f;
+    if(raw > 0.0f) raw = 0.0f;
+    return (int8_t)raw;
+}
+
 static void
     measure_set_state(RadioGoshuinchoApp* app, GoshuinMeasureState state, const char* message) {
     with_view_model(
@@ -368,32 +567,24 @@ static void
         true);
 }
 
-static bool radio_start(RadioGoshuinchoApp* app) {
-    subghz_devices_init();
-    app->devices_initialized = true;
-    app->radio = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
-    if(!app->radio) return false;
-    /* The internal CC1101 has no begin hook and therefore returns false here.
-       The official Sub-GHz app also calls begin unconditionally and ignores that value. */
-    subghz_devices_begin(app->radio);
-    app->radio_begun = true;
-    if(!subghz_devices_is_frequency_valid(app->radio, GOSHUIN_RF_FREQUENCY_HZ)) return false;
-    subghz_devices_reset(app->radio);
-    subghz_devices_idle(app->radio);
-    subghz_devices_load_preset(app->radio, FuriHalSubGhzPresetOok650Async, NULL);
-    app->measurement_frequency_hz =
-        subghz_devices_set_frequency(app->radio, GOSHUIN_RF_FREQUENCY_HZ);
-    if(!subghz_devices_is_frequency_valid(app->radio, app->measurement_frequency_hz)) {
-        return false;
-    }
-    subghz_devices_flush_rx(app->radio);
-    subghz_devices_set_rx(app->radio);
-    app->radio_receiving = true;
-    return true;
+static void
+    multi_set_state(RadioGoshuinchoApp* app, GoshuinMeasureState state, const char* message) {
+    with_view_model(
+        app->multi_measure_view,
+        GoshuinMultiMeasureModel * model,
+        {
+            model->state = state;
+            if(message) {
+                strncpy(model->message, message, sizeof(model->message) - 1U);
+                model->message[sizeof(model->message) - 1U] = '\0';
+            }
+        },
+        true);
 }
 
 static void measure_start(RadioGoshuinchoApp* app) {
     furi_hal_rtc_get_datetime(&app->measurement_datetime);
+    app->legacy_tick_count = 0;
     with_view_model(
         app->measure_view,
         GoshuinMeasureModel * model,
@@ -405,7 +596,8 @@ static void measure_start(RadioGoshuinchoApp* app) {
         },
         true);
     switch_view(app, GoshuinViewMeasure);
-    if(!radio_start(app)) {
+    if(!radio_acquire(app) ||
+       !radio_tune_rx(app, GOSHUIN_RF_FREQUENCY_HZ, &app->measurement_frequency_hz)) {
         radio_release(app);
         measure_set_state(app, GoshuinMeasureFailed, "Radio unavailable");
     }
@@ -422,8 +614,9 @@ static void measure_finish_and_save(RadioGoshuinchoApp* app) {
             memcpy(samples, model->samples, count);
         },
         false);
+    GoshuinStampPayload* stamp = &app->working_record.payload.legacy;
     if(!goshuin_stamp_create_measured(
-           &app->working_stamp,
+           stamp,
            app->location,
            &app->measurement_datetime,
            app->measurement_frequency_hz,
@@ -433,21 +626,20 @@ static void measure_finish_and_save(RadioGoshuinchoApp* app) {
         display_message(app, GoshuinDisplayError, "Measurement invalid", GoshuinReturnMain);
         return;
     }
+    app->working_record.format_version = GOSHUIN_FILE_VERSION_CURRENT;
     char path[GOSHUIN_PATH_CAPACITY];
-    if(stamp_write(app, &app->working_stamp, path, sizeof(path))) {
-        display_stamp(app, &app->working_stamp, true, GoshuinReturnMain);
+    if(write_legacy_stamp(app, stamp, path, sizeof(path))) {
+        display_record(app, &app->working_record, GoshuinReturnMain);
     } else {
         display_message(app, GoshuinDisplayError, "microSD save failed", GoshuinReturnMain);
     }
 }
 
-static void measure_tick(void* context) {
-    RadioGoshuinchoApp* app = context;
-    if((app->current_view != GoshuinViewMeasure) || !app->radio_receiving) return;
-    float raw = subghz_devices_get_rssi(app->radio);
-    if(raw < -127.0f) raw = -127.0f;
-    if(raw > 0.0f) raw = 0.0f;
-    const int8_t rssi = (int8_t)raw;
+static void legacy_measure_tick(RadioGoshuinchoApp* app) {
+    if(!app->radio_receiving) return;
+    if(++app->legacy_tick_count < GOSHUIN_LEGACY_TICK_DIVIDER) return;
+    app->legacy_tick_count = 0;
+    const int8_t rssi = radio_read_rssi(app);
     bool complete = false;
     with_view_model(
         app->measure_view,
@@ -473,6 +665,20 @@ static int32_t graph_y(int8_t rssi) {
     return y;
 }
 
+static void draw_graph(Canvas* canvas, const int8_t* samples, uint8_t count, uint8_t capacity) {
+    canvas_draw_frame(canvas, 2, 24, 124, 30);
+    if(!count) return;
+    int32_t px = 3;
+    int32_t py = graph_y(samples[0]);
+    for(size_t i = 1; i < count; ++i) {
+        const int32_t x = 3 + (int32_t)(i * 121U / (capacity - 1U));
+        const int32_t y = graph_y(samples[i]);
+        canvas_draw_line(canvas, px, py, x, y);
+        px = x;
+        py = y;
+    }
+}
+
 static void measure_draw(Canvas* canvas, void* context) {
     const GoshuinMeasureModel* model = context;
     canvas_clear(canvas);
@@ -492,19 +698,8 @@ static void measure_draw(Canvas* canvas, void* context) {
             (model->sample_count % 5U) * 2U);
     }
     canvas_draw_str(canvas, 2, 20, line);
-    canvas_draw_frame(canvas, 2, 24, 124, 30);
-    if(model->sample_count > 0U) {
-        int32_t px = 3;
-        int32_t py = graph_y(model->samples[0]);
-        for(size_t i = 1; i < model->sample_count; ++i) {
-            const int32_t x = 3 + (int32_t)(i * 121U / (GOSHUIN_RF_SAMPLE_COUNT - 1U));
-            const int32_t y = graph_y(model->samples[i]);
-            canvas_draw_line(canvas, px, py, x, y);
-            px = x;
-            py = y;
-        }
-    }
-    const uint8_t progress = (uint8_t)(model->sample_count * 124U / GOSHUIN_RF_SAMPLE_COUNT);
+    draw_graph(canvas, model->samples, model->sample_count, GOSHUIN_RF_SAMPLE_COUNT);
+    const uint8_t progress = model->sample_count * 124U / GOSHUIN_RF_SAMPLE_COUNT;
     canvas_draw_box(canvas, 2, 55, progress, 2);
     if(model->state == GoshuinMeasureRunning) {
         elements_button_left(canvas, "Cancel");
@@ -541,6 +736,201 @@ static bool measure_input(InputEvent* event, void* context) {
     return false;
 }
 
+static bool multi_tune_band(RadioGoshuinchoApp* app, uint8_t band_index) {
+    GoshuinStampPayloadV3* stamp = &app->working_record.payload.multiband;
+    GoshuinBandPayloadV3* band = &stamp->bands[band_index];
+    if(!radio_tune_rx(app, band->requested_frequency_hz, &band->actual_frequency_hz)) return false;
+    app->multi_settling = true;
+    app->multi_read_count = 0;
+    app->multi_peak_rssi = -127;
+    with_view_model(
+        app->multi_measure_view,
+        GoshuinMultiMeasureModel * model,
+        {
+            model->band_index = band_index;
+            model->band_sample_count = 0;
+            model->actual_frequency_hz = band->actual_frequency_hz;
+            model->current_rssi = -127;
+            memset(model->samples, 0, sizeof(model->samples));
+        },
+        true);
+    return true;
+}
+
+static void multi_start(RadioGoshuinchoApp* app) {
+    furi_hal_rtc_get_datetime(&app->measurement_datetime);
+    app->working_record.format_version = GOSHUIN_FILE_VERSION_V3;
+    goshuin_multiband_initialize(
+        &app->working_record.payload.multiband,
+        app->location,
+        &app->measurement_datetime,
+        GOSHUIN_MULTI_WINDOW_MS,
+        GOSHUIN_MULTI_SETTLE_MS,
+        GOSHUIN_TICK_MS);
+    with_view_model(
+        app->multi_measure_view,
+        GoshuinMultiMeasureModel * model,
+        {
+            memset(model, 0, sizeof(*model));
+            model->state = GoshuinMeasureRunning;
+            model->current_rssi = -127;
+            strcpy(model->message, "Receiving only");
+        },
+        true);
+    switch_view(app, GoshuinViewMultiMeasure);
+    if(!radio_acquire(app) || !multi_tune_band(app, 0U)) {
+        radio_release(app);
+        multi_set_state(app, GoshuinMeasureFailed, "Radio unavailable");
+    }
+}
+
+static void multi_measure_tick(RadioGoshuinchoApp* app) {
+    if(!app->radio_receiving) return;
+    if(app->multi_settling) {
+        app->multi_settling = false;
+        app->multi_read_count = 0;
+        app->multi_peak_rssi = -127;
+        return;
+    }
+    const int8_t rssi = radio_read_rssi(app);
+    if(!app->multi_read_count || (rssi > app->multi_peak_rssi)) app->multi_peak_rssi = rssi;
+    ++app->multi_read_count;
+    with_view_model(
+        app->multi_measure_view,
+        GoshuinMultiMeasureModel * model,
+        { model->current_rssi = rssi; },
+        true);
+    if(app->multi_read_count < GOSHUIN_MULTI_READS_PER_WINDOW) return;
+
+    uint8_t band_index;
+    with_view_model(
+        app->multi_measure_view,
+        GoshuinMultiMeasureModel * model,
+        { band_index = model->band_index; },
+        false);
+    GoshuinBandPayloadV3* band = &app->working_record.payload.multiband.bands[band_index];
+    const uint8_t sample_index = band->valid_count;
+    if(sample_index >= GOSHUIN_MULTIBAND_SAMPLES) {
+        radio_release(app);
+        multi_set_state(app, GoshuinMeasureFailed, "Sample overflow");
+        return;
+    }
+    band->rssi_samples[sample_index] = app->multi_peak_rssi;
+    band->valid_mask |= (uint16_t)(1U << sample_index);
+    ++band->valid_count;
+    app->multi_read_count = 0;
+    app->multi_peak_rssi = -127;
+    with_view_model(
+        app->multi_measure_view,
+        GoshuinMultiMeasureModel * model,
+        {
+            model->samples[sample_index] = band->rssi_samples[sample_index];
+            model->band_sample_count = band->valid_count;
+            ++model->total_sample_count;
+        },
+        true);
+
+    if(band->valid_count < GOSHUIN_MULTIBAND_SAMPLES) return;
+    if((band_index + 1U) < GOSHUIN_MULTIBAND_COUNT) {
+        if(!multi_tune_band(app, band_index + 1U)) {
+            radio_release(app);
+            multi_set_state(app, GoshuinMeasureFailed, "Frequency failed");
+        }
+        return;
+    }
+    radio_release(app);
+    if(goshuin_multiband_finalize(&app->working_record.payload.multiband)) {
+        multi_set_state(app, GoshuinMeasureCompleted, "5 bands complete");
+    } else {
+        multi_set_state(app, GoshuinMeasureFailed, "Measurement invalid");
+    }
+}
+
+static void multi_finish_and_save(RadioGoshuinchoApp* app) {
+    char path[GOSHUIN_PATH_CAPACITY];
+    if(write_multiband_stamp(app, &app->working_record.payload.multiband, path, sizeof(path))) {
+        display_record(app, &app->working_record, GoshuinReturnMain);
+    } else {
+        display_message(app, GoshuinDisplayError, "microSD save failed", GoshuinReturnMain);
+    }
+}
+
+static void multi_draw(Canvas* canvas, void* context) {
+    const GoshuinMultiMeasureModel* model = context;
+    canvas_clear(canvas);
+    char line[40];
+    const uint32_t thousandths = (model->actual_frequency_hz + 500UL) / 1000UL;
+    canvas_set_font(canvas, FontPrimary);
+    snprintf(
+        line,
+        sizeof(line),
+        "5B %u/5 %lu.%03luMHz",
+        model->band_index + 1U,
+        (unsigned long)(thousandths / 1000UL),
+        (unsigned long)(thousandths % 1000UL));
+    canvas_draw_str(canvas, 2, 9, line);
+    canvas_set_font(canvas, FontSecondary);
+    if(model->state == GoshuinMeasureCompleted) {
+        snprintf(line, sizeof(line), "Complete: %u samples", model->total_sample_count);
+    } else {
+        snprintf(
+            line,
+            sizeof(line),
+            "RSSI %d dBm  %u/80",
+            model->current_rssi,
+            model->total_sample_count);
+    }
+    canvas_draw_str(canvas, 2, 20, line);
+    draw_graph(canvas, model->samples, model->band_sample_count, GOSHUIN_MULTIBAND_SAMPLES);
+    const uint8_t progress =
+        model->total_sample_count * 124U / (GOSHUIN_MULTIBAND_COUNT * GOSHUIN_MULTIBAND_SAMPLES);
+    canvas_draw_box(canvas, 2, 55, progress, 2);
+    if(model->state == GoshuinMeasureRunning) {
+        elements_button_left(canvas, "Cancel");
+    } else if(model->state == GoshuinMeasureCompleted) {
+        elements_button_center(canvas, "Create+Save");
+    } else {
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, 10, 29, 108, 18);
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_str_aligned(canvas, 64, 40, AlignCenter, AlignCenter, model->message);
+        elements_button_left(canvas, "Back");
+    }
+}
+
+static bool multi_input(InputEvent* event, void* context) {
+    RadioGoshuinchoApp* app = context;
+    if(event->type != InputTypeShort) return false;
+    GoshuinMeasureState state;
+    with_view_model(
+        app->multi_measure_view,
+        GoshuinMultiMeasureModel * model,
+        { state = model->state; },
+        false);
+    if(event->key == InputKeyBack) {
+        if(state == GoshuinMeasureRunning) {
+            radio_release(app);
+            multi_set_state(app, GoshuinMeasureInterrupted, "Measurement cancelled");
+        } else {
+            switch_view(app, GoshuinViewMain);
+        }
+        return true;
+    }
+    if((event->key == InputKeyOk) && (state == GoshuinMeasureCompleted)) {
+        multi_finish_and_save(app);
+        return true;
+    }
+    return false;
+}
+
+static void app_tick(void* context) {
+    RadioGoshuinchoApp* app = context;
+    if(app->current_view == GoshuinViewMeasure)
+        legacy_measure_tick(app);
+    else if(app->current_view == GoshuinViewMultiMeasure)
+        multi_measure_tick(app);
+}
+
 static bool location_validator(const char* text, FuriString* error, void* context) {
     UNUSED(context);
     if(!text[0]) {
@@ -566,10 +956,12 @@ static void location_done(void* context) {
 static void create_demo(RadioGoshuinchoApp* app) {
     DateTime datetime;
     furi_hal_rtc_get_datetime(&datetime);
-    goshuin_stamp_create_demo(&app->working_stamp, app->location, &datetime);
+    app->working_record.format_version = GOSHUIN_FILE_VERSION_CURRENT;
+    GoshuinStampPayload* stamp = &app->working_record.payload.legacy;
+    goshuin_stamp_create_demo(stamp, app->location, &datetime);
     char path[GOSHUIN_PATH_CAPACITY];
-    if(stamp_write(app, &app->working_stamp, path, sizeof(path))) {
-        display_stamp(app, &app->working_stamp, true, GoshuinReturnMain);
+    if(write_legacy_stamp(app, stamp, path, sizeof(path))) {
+        display_record(app, &app->working_record, GoshuinReturnMain);
     } else {
         display_message(app, GoshuinDisplayError, "microSD save failed", GoshuinReturnMain);
     }
@@ -584,8 +976,8 @@ static void saved_item_callback(void* context, uint32_t index) {
 
 static void open_saved(RadioGoshuinchoApp* app) {
     if((app->pending_saved_index < app->saved_count) &&
-       stamp_read(app, app->saved_paths[app->pending_saved_index], &app->working_stamp)) {
-        display_stamp(app, &app->working_stamp, true, GoshuinReturnSaved);
+       read_record(app, app->saved_paths[app->pending_saved_index], &app->working_record)) {
+        display_record(app, &app->working_record, GoshuinReturnSaved);
     } else {
         display_message(app, GoshuinDisplayError, "Invalid stamp file", GoshuinReturnSaved);
     }
@@ -594,7 +986,9 @@ static void open_saved(RadioGoshuinchoApp* app) {
 static bool custom_event(void* context, uint32_t event) {
     RadioGoshuinchoApp* app = context;
     if(event == GoshuinCustomLocationDone) {
-        if(app->pending_source == GoshuinMeasurementSubGhzReceive)
+        if(app->pending_mode == GoshuinModeMulti)
+            multi_start(app);
+        else if(app->pending_mode == GoshuinModeReal)
             measure_start(app);
         else
             create_demo(app);
@@ -642,20 +1036,35 @@ static void load_saved_menu(RadioGoshuinchoApp* app) {
     }
     size_t valid = 0;
     for(size_t i = 0; i < app->saved_count; ++i) {
-        if(!stamp_read(app, app->saved_paths[i], &app->working_stamp)) continue;
+        if(!read_record(app, app->saved_paths[i], &app->working_record)) continue;
         if(valid != i)
             memcpy(app->saved_paths[valid], app->saved_paths[i], sizeof(app->saved_paths[valid]));
-        snprintf(
-            app->saved_labels[valid],
-            GOSHUIN_LABEL_CAPACITY,
-            "%c %04u-%02u-%02u %02u:%02u %s",
-            app->working_stamp.measurement_source == GoshuinMeasurementSubGhzReceive ? 'R' : 'D',
-            app->working_stamp.year,
-            app->working_stamp.month,
-            app->working_stamp.day,
-            app->working_stamp.hour,
-            app->working_stamp.minute,
-            app->working_stamp.location);
+        if(app->working_record.format_version == GOSHUIN_FILE_VERSION_V3) {
+            const GoshuinStampPayloadV3* stamp = &app->working_record.payload.multiband;
+            snprintf(
+                app->saved_labels[valid],
+                GOSHUIN_LABEL_CAPACITY,
+                "5B %04u-%02u-%02u %02u:%02u %s",
+                stamp->year,
+                stamp->month,
+                stamp->day,
+                stamp->hour,
+                stamp->minute,
+                stamp->location);
+        } else {
+            const GoshuinStampPayload* stamp = &app->working_record.payload.legacy;
+            snprintf(
+                app->saved_labels[valid],
+                GOSHUIN_LABEL_CAPACITY,
+                "%c %04u-%02u-%02u %02u:%02u %s",
+                stamp->measurement_source == GoshuinMeasurementSubGhzReceive ? 'R' : 'D',
+                stamp->year,
+                stamp->month,
+                stamp->day,
+                stamp->hour,
+                stamp->minute,
+                stamp->location);
+        }
         submenu_add_item(
             app->saved_menu, app->saved_labels[valid], valid, saved_item_callback, app);
         ++valid;
@@ -667,13 +1076,14 @@ static void load_saved_menu(RadioGoshuinchoApp* app) {
         submenu_add_item(app->saved_menu, "No saved stamps", UINT32_MAX, NULL, NULL);
 }
 
-static void begin_location(RadioGoshuinchoApp* app, GoshuinMeasurementSource source) {
-    app->pending_source = source;
+static void begin_location(RadioGoshuinchoApp* app, GoshuinMode mode) {
+    app->pending_mode = mode;
     app->location[0] = '\0';
     text_input_reset(app->text_input);
-    text_input_set_header_text(
-        app->text_input,
-        source == GoshuinMeasurementSubGhzReceive ? "Real RF place name" : "Demo place name");
+    const char* header = mode == GoshuinModeMulti ? "5 Bands place name" :
+                         mode == GoshuinModeReal  ? "Real RF place name" :
+                                                    "Demo place name";
+    text_input_set_header_text(app->text_input, header);
     text_input_set_minimum_length(app->text_input, 1U);
     text_input_set_validator(app->text_input, location_validator, app);
     text_input_set_result_callback(
@@ -683,15 +1093,17 @@ static void begin_location(RadioGoshuinchoApp* app, GoshuinMeasurementSource sou
 
 static void main_menu_callback(void* context, uint32_t index) {
     RadioGoshuinchoApp* app = context;
-    if(index == GoshuinMainReal)
-        begin_location(app, GoshuinMeasurementSubGhzReceive);
+    if(index == GoshuinMainMulti)
+        begin_location(app, GoshuinModeMulti);
+    else if(index == GoshuinMainReal)
+        begin_location(app, GoshuinModeReal);
     else if(index == GoshuinMainDemo)
-        begin_location(app, GoshuinMeasurementDummy);
+        begin_location(app, GoshuinModeDemo);
     else if(index == GoshuinMainSaved) {
         load_saved_menu(app);
         switch_view(app, GoshuinViewSaved);
     } else if(index == GoshuinMainAbout) {
-        display_message(app, GoshuinDisplayAbout, "Radio Goshuincho Phase B", GoshuinReturnMain);
+        display_message(app, GoshuinDisplayAbout, "Radio Goshuincho Phase C", GoshuinReturnMain);
     }
 }
 
@@ -716,6 +1128,7 @@ static RadioGoshuinchoApp* app_alloc(void) {
     app->text_input = text_input_alloc();
     app->display_view = view_alloc();
     app->measure_view = view_alloc();
+    app->multi_measure_view = view_alloc();
     view_allocate_model(app->display_view, ViewModelTypeLocking, sizeof(GoshuinDisplayModel));
     view_set_context(app->display_view, app);
     view_set_draw_callback(app->display_view, display_draw);
@@ -724,7 +1137,13 @@ static RadioGoshuinchoApp* app_alloc(void) {
     view_set_context(app->measure_view, app);
     view_set_draw_callback(app->measure_view, measure_draw);
     view_set_input_callback(app->measure_view, measure_input);
+    view_allocate_model(
+        app->multi_measure_view, ViewModelTypeLocking, sizeof(GoshuinMultiMeasureModel));
+    view_set_context(app->multi_measure_view, app);
+    view_set_draw_callback(app->multi_measure_view, multi_draw);
+    view_set_input_callback(app->multi_measure_view, multi_input);
     submenu_set_header(app->main_menu, "Radio Goshuincho");
+    submenu_add_item(app->main_menu, "5 Bands", GoshuinMainMulti, main_menu_callback, app);
     submenu_add_item(app->main_menu, "Real RF", GoshuinMainReal, main_menu_callback, app);
     submenu_add_item(app->main_menu, "Demo", GoshuinMainDemo, main_menu_callback, app);
     submenu_add_item(app->main_menu, "Saved Stamps", GoshuinMainSaved, main_menu_callback, app);
@@ -737,11 +1156,12 @@ static RadioGoshuinchoApp* app_alloc(void) {
         app->view_dispatcher, GoshuinViewSaved, submenu_get_view(app->saved_menu));
     view_dispatcher_add_view(app->view_dispatcher, GoshuinViewDisplay, app->display_view);
     view_dispatcher_add_view(app->view_dispatcher, GoshuinViewMeasure, app->measure_view);
+    view_dispatcher_add_view(
+        app->view_dispatcher, GoshuinViewMultiMeasure, app->multi_measure_view);
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, custom_event);
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, navigation);
-    view_dispatcher_set_tick_event_callback(
-        app->view_dispatcher, measure_tick, GOSHUIN_RF_INTERVAL_MS);
+    view_dispatcher_set_tick_event_callback(app->view_dispatcher, app_tick, GOSHUIN_TICK_MS);
     view_dispatcher_attach_to_gui(app->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
     return app;
 }
@@ -753,6 +1173,8 @@ static void app_free(RadioGoshuinchoApp* app) {
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewSaved);
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewDisplay);
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewMeasure);
+    view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewMultiMeasure);
+    view_free(app->multi_measure_view);
     view_free(app->measure_view);
     view_free(app->display_view);
     text_input_free(app->text_input);
