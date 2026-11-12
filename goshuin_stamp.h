@@ -18,6 +18,7 @@ typedef enum {
     GoshuinMeasurementDummy = 0,
     GoshuinMeasurementSubGhzReceive = 1,
     GoshuinMeasurementMultiBandReceive = 2,
+    GoshuinMeasurementThemedMultiBand = 3,
 } GoshuinMeasurementSource;
 
 typedef enum {

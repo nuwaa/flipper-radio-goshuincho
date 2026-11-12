@@ -1,5 +1,6 @@
 #include "goshuin_multiband.h"
 #include "goshuin_stamp.h"
+#include "goshuin_themed.h"
 
 #include <furi.h>
 #include <furi_hal_rtc.h>
@@ -48,6 +49,7 @@ typedef enum {
     GoshuinViewDisplay,
     GoshuinViewMeasure,
     GoshuinViewMultiMeasure,
+    GoshuinViewTheme,
 } GoshuinViewId;
 
 typedef enum {
@@ -78,6 +80,7 @@ typedef enum {
 typedef enum {
     GoshuinReturnMain,
     GoshuinReturnSaved,
+    GoshuinReturnTheme,
 } GoshuinReturnTarget;
 
 typedef enum {
@@ -93,12 +96,14 @@ typedef struct {
     union {
         GoshuinStampPayload legacy;
         GoshuinStampPayloadV3 multiband;
+        GoshuinStampPayloadV4 themed;
     } payload;
 } GoshuinRecord;
 
 typedef struct {
     GoshuinDisplayMode mode;
     bool show_info;
+    bool save_prompt;
     uint8_t band_page;
     GoshuinRecord record;
     char message[64];
@@ -127,6 +132,7 @@ typedef struct {
     ViewDispatcher* view_dispatcher;
     Submenu* main_menu;
     Submenu* saved_menu;
+    Submenu* theme_menu;
     TextInput* text_input;
     View* display_view;
     View* measure_view;
@@ -141,6 +147,9 @@ typedef struct {
     size_t saved_count;
     size_t pending_saved_index;
     GoshuinRecord working_record;
+    GoshuinStampPayloadV3 multi_observation;
+    bool multi_observation_ready;
+    bool preview_pending;
     DateTime measurement_datetime;
     uint32_t measurement_frequency_hz;
     uint8_t legacy_tick_count;
@@ -246,14 +255,14 @@ static bool write_legacy_stamp(
         output_size);
 }
 
-static bool write_multiband_stamp(
+static bool write_themed_stamp(
     RadioGoshuinchoApp* app,
-    const GoshuinStampPayloadV3* stamp,
+    const GoshuinStampPayloadV4* stamp,
     char* output_path,
     size_t output_size) {
     return write_payload(
         app,
-        GOSHUIN_FILE_VERSION_V3,
+        GOSHUIN_FILE_VERSION_V4,
         stamp,
         sizeof(*stamp),
         stamp->year,
@@ -274,6 +283,7 @@ static bool read_record(RadioGoshuinchoApp* app, const char* path, GoshuinRecord
         GoshuinStampPayloadV1 v1;
         GoshuinStampPayload v2;
         GoshuinStampPayloadV3 v3;
+        GoshuinStampPayloadV4 v4;
     } payload;
     File* file = storage_file_alloc(app->storage);
     bool success = storage_file_open(file, path, FSAM_READ, FSOM_OPEN_EXISTING);
@@ -286,7 +296,9 @@ static bool read_record(RadioGoshuinchoApp* app, const char* path, GoshuinRecord
                    ((header.format_version == GOSHUIN_FILE_VERSION_CURRENT) &&
                     (header.payload_size == sizeof(GoshuinStampPayload))) ||
                    ((header.format_version == GOSHUIN_FILE_VERSION_V3) &&
-                    (header.payload_size == sizeof(GoshuinStampPayloadV3))));
+                    (header.payload_size == sizeof(GoshuinStampPayloadV3))) ||
+                   ((header.format_version == GOSHUIN_FILE_VERSION_V4) &&
+                    (header.payload_size == sizeof(GoshuinStampPayloadV4))));
     }
     if(success)
         success = storage_file_read(file, &payload, header.payload_size) == header.payload_size;
@@ -295,7 +307,9 @@ static bool read_record(RadioGoshuinchoApp* app, const char* path, GoshuinRecord
     if(success) success = header.payload_crc32 == goshuin_crc32(&payload, header.payload_size);
     if(success) {
         record->format_version = header.format_version;
-        if(header.format_version == GOSHUIN_FILE_VERSION_V3) {
+        if(header.format_version == GOSHUIN_FILE_VERSION_V4) {
+            success = goshuin_themed_decode(&payload, header.payload_size, &record->payload.themed);
+        } else if(header.format_version == GOSHUIN_FILE_VERSION_V3) {
             success = goshuin_multiband_decode(
                 &payload, header.payload_size, &record->payload.multiband);
         } else {
@@ -317,7 +331,12 @@ static void display_record(
         {
             model->mode = GoshuinDisplayStamp;
             model->show_info = true;
-            model->band_page = 0;
+            model->save_prompt = false;
+            model->band_page =
+                (record->format_version == GOSHUIN_FILE_VERSION_V4) &&
+                        (record->payload.themed.theme_id >= GoshuinTheme315) ?
+                    (uint8_t)(record->payload.themed.theme_id - GoshuinTheme315) :
+                    0U;
             model->record = *record;
             model->message[0] = '\0';
         },
@@ -351,10 +370,10 @@ static void display_draw(Canvas* canvas, void* context) {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 9, AlignCenter, AlignBottom, "Radio Goshuincho");
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 3, 22, "Phase C - RX only");
+        canvas_draw_str(canvas, 3, 22, "Phase D - RX only");
         canvas_draw_str(canvas, 3, 32, "5 Bands + Real + Demo");
         canvas_draw_str(canvas, 3, 42, "No Sub-GHz TX capability");
-        canvas_draw_str(canvas, 3, 52, "Version 0.3.0 / microSD");
+        canvas_draw_str(canvas, 3, 52, "Version 0.4.0 / microSD");
         elements_button_left(canvas, "Back");
         return;
     }
@@ -367,18 +386,28 @@ static void display_draw(Canvas* canvas, void* context) {
         return;
     }
 
-    const bool multiband = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
-    const uint8_t* seal = multiband ? model->record.payload.multiband.seal :
-                                      model->record.payload.legacy.seal;
+    const bool v3 = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
+    const bool v4 = model->record.format_version == GOSHUIN_FILE_VERSION_V4;
+    const bool multiband = v3 || v4;
+    const uint8_t* seal = v4   ? model->record.payload.themed.seal :
+                          v3   ? model->record.payload.multiband.seal :
+                                 model->record.payload.legacy.seal;
     if(!model->show_info) {
         canvas_draw_xbm(canvas, 0, 0, GOSHUIN_SEAL_WIDTH, GOSHUIN_SEAL_HEIGHT, seal);
+        if(model->save_prompt) elements_button_center(canvas, "Save");
         return;
     }
 
     char line[48];
     char title[24];
     canvas_set_font(canvas, FontPrimary);
-    if(multiband) {
+    if(v4) {
+        snprintf(
+            title,
+            sizeof(title),
+            "%s",
+            goshuin_theme_name((GoshuinThemeId)model->record.payload.themed.theme_id));
+    } else if(v3) {
         snprintf(
             title,
             sizeof(title),
@@ -390,20 +419,35 @@ static void display_draw(Canvas* canvas, void* context) {
     canvas_draw_str_aligned(canvas, 64, 9, AlignCenter, AlignBottom, title);
     canvas_set_font(canvas, FontSecondary);
     if(multiband) {
-        const GoshuinStampPayloadV3* stamp = &model->record.payload.multiband;
-        const GoshuinBandPayloadV3* band = &stamp->bands[model->band_page];
-        snprintf(line, sizeof(line), "Place: %s", stamp->location);
+        const GoshuinBandPayloadV3* band = v4 ?
+                                                   &model->record.payload.themed.bands[model->band_page] :
+                                                   &model->record.payload.multiband.bands[model->band_page];
+        const char* location = v4 ? model->record.payload.themed.location :
+                                    model->record.payload.multiband.location;
+        const uint16_t year = v4 ? model->record.payload.themed.year :
+                                   model->record.payload.multiband.year;
+        const uint8_t month = v4 ? model->record.payload.themed.month :
+                                   model->record.payload.multiband.month;
+        const uint8_t day = v4 ? model->record.payload.themed.day :
+                                 model->record.payload.multiband.day;
+        const uint8_t hour = v4 ? model->record.payload.themed.hour :
+                                  model->record.payload.multiband.hour;
+        const uint8_t minute = v4 ? model->record.payload.themed.minute :
+                                    model->record.payload.multiband.minute;
+        const uint8_t second = v4 ? model->record.payload.themed.second :
+                                    model->record.payload.multiband.second;
+        snprintf(line, sizeof(line), "Place: %s", location);
         canvas_draw_str(canvas, 2, 20, line);
         snprintf(
             line,
             sizeof(line),
             "%04u-%02u-%02u %02u:%02u:%02u",
-            stamp->year,
-            stamp->month,
-            stamp->day,
-            stamp->hour,
-            stamp->minute,
-            stamp->second);
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second);
         canvas_draw_str(canvas, 2, 31, line);
         const uint32_t thousandths = (band->actual_frequency_hz + 500UL) / 1000UL;
         snprintf(
@@ -466,12 +510,38 @@ static void display_draw(Canvas* canvas, void* context) {
     }
 }
 
+static void save_theme_preview(RadioGoshuinchoApp* app) {
+    char path[GOSHUIN_PATH_CAPACITY];
+    if(write_themed_stamp(app, &app->working_record.payload.themed, path, sizeof(path))) {
+        app->preview_pending = false;
+        with_view_model(
+            app->display_view,
+            GoshuinDisplayModel * model,
+            {
+                model->save_prompt = false;
+                model->show_info = true;
+            },
+            true);
+    } else {
+        app->preview_pending = false;
+        display_message(app, GoshuinDisplayError, "microSD save failed", GoshuinReturnTheme);
+    }
+}
+
 static bool display_input(InputEvent* event, void* context) {
     RadioGoshuinchoApp* app = context;
     if(event->type != InputTypeShort) return false;
     if(event->key == InputKeyBack) {
-        switch_view(
-            app, app->display_return == GoshuinReturnSaved ? GoshuinViewSaved : GoshuinViewMain);
+        app->preview_pending = false;
+        const GoshuinViewId target = app->display_return == GoshuinReturnSaved ?
+                                         GoshuinViewSaved :
+                                     app->display_return == GoshuinReturnTheme ? GoshuinViewTheme :
+                                                                                GoshuinViewMain;
+        switch_view(app, target);
+        return true;
+    }
+    if((event->key == InputKeyOk) && app->preview_pending) {
+        save_theme_preview(app);
         return true;
     }
     with_view_model(
@@ -479,7 +549,9 @@ static bool display_input(InputEvent* event, void* context) {
         GoshuinDisplayModel * model,
         {
             if(model->mode == GoshuinDisplayStamp) {
-                const bool multiband = model->record.format_version == GOSHUIN_FILE_VERSION_V3;
+                const bool multiband =
+                    (model->record.format_version == GOSHUIN_FILE_VERSION_V3) ||
+                    (model->record.format_version == GOSHUIN_FILE_VERSION_V4);
                 if(event->key == InputKeyOk) {
                     model->show_info = !model->show_info;
                 } else if(multiband && model->show_info && (event->key == InputKeyLeft)) {
@@ -759,6 +831,7 @@ static bool multi_tune_band(RadioGoshuinchoApp* app, uint8_t band_index) {
 
 static void multi_start(RadioGoshuinchoApp* app) {
     furi_hal_rtc_get_datetime(&app->measurement_datetime);
+    app->multi_observation_ready = false;
     app->working_record.format_version = GOSHUIN_FILE_VERSION_V3;
     goshuin_multiband_initialize(
         &app->working_record.payload.multiband,
@@ -840,19 +913,49 @@ static void multi_measure_tick(RadioGoshuinchoApp* app) {
     }
     radio_release(app);
     if(goshuin_multiband_finalize(&app->working_record.payload.multiband)) {
+        app->multi_observation = app->working_record.payload.multiband;
+        app->multi_observation_ready = true;
         multi_set_state(app, GoshuinMeasureCompleted, "5 bands complete");
     } else {
         multi_set_state(app, GoshuinMeasureFailed, "Measurement invalid");
     }
 }
 
-static void multi_finish_and_save(RadioGoshuinchoApp* app) {
-    char path[GOSHUIN_PATH_CAPACITY];
-    if(write_multiband_stamp(app, &app->working_record.payload.multiband, path, sizeof(path))) {
-        display_record(app, &app->working_record, GoshuinReturnMain);
-    } else {
-        display_message(app, GoshuinDisplayError, "microSD save failed", GoshuinReturnMain);
+static void theme_item_callback(void* context, uint32_t index) {
+    RadioGoshuinchoApp* app = context;
+    const GoshuinThemeId theme = (GoshuinThemeId)index;
+    if(!app->multi_observation_ready ||
+       !goshuin_themed_create(&app->working_record.payload.themed, &app->multi_observation, theme)) {
+        display_message(app, GoshuinDisplayError, "Theme generation failed", GoshuinReturnTheme);
+        return;
     }
+    app->working_record.format_version = GOSHUIN_FILE_VERSION_V4;
+    app->preview_pending = true;
+    display_record(app, &app->working_record, GoshuinReturnTheme);
+    with_view_model(
+        app->display_view,
+        GoshuinDisplayModel * model,
+        {
+            model->show_info = false;
+            model->save_prompt = true;
+        },
+        true);
+}
+
+static void show_theme_menu(RadioGoshuinchoApp* app) {
+    submenu_reset(app->theme_menu);
+    submenu_set_header(app->theme_menu, "Choose Goshuin Design");
+    submenu_add_item(
+        app->theme_menu, "5 Bands - Integrated", GoshuinThemeCombined, theme_item_callback, app);
+    submenu_add_item(app->theme_menu, "315 MHz - Life", GoshuinTheme315, theme_item_callback, app);
+    submenu_add_item(
+        app->theme_menu, "426 MHz - Facility", GoshuinTheme426, theme_item_callback, app);
+    submenu_add_item(
+        app->theme_menu, "429 MHz - Industry", GoshuinTheme429, theme_item_callback, app);
+    submenu_add_item(
+        app->theme_menu, "433 MHz - Vehicle", GoshuinTheme433, theme_item_callback, app);
+    submenu_add_item(app->theme_menu, "920 MHz - IoT", GoshuinTheme920, theme_item_callback, app);
+    switch_view(app, GoshuinViewTheme);
 }
 
 static void multi_draw(Canvas* canvas, void* context) {
@@ -888,7 +991,7 @@ static void multi_draw(Canvas* canvas, void* context) {
     if(model->state == GoshuinMeasureRunning) {
         elements_button_left(canvas, "Cancel");
     } else if(model->state == GoshuinMeasureCompleted) {
-        elements_button_center(canvas, "Create+Save");
+        elements_button_center(canvas, "Choose");
     } else {
         canvas_set_color(canvas, ColorWhite);
         canvas_draw_box(canvas, 10, 29, 108, 18);
@@ -917,7 +1020,7 @@ static bool multi_input(InputEvent* event, void* context) {
         return true;
     }
     if((event->key == InputKeyOk) && (state == GoshuinMeasureCompleted)) {
-        multi_finish_and_save(app);
+        show_theme_menu(app);
         return true;
     }
     return false;
@@ -1039,7 +1142,19 @@ static void load_saved_menu(RadioGoshuinchoApp* app) {
         if(!read_record(app, app->saved_paths[i], &app->working_record)) continue;
         if(valid != i)
             memcpy(app->saved_paths[valid], app->saved_paths[i], sizeof(app->saved_paths[valid]));
-        if(app->working_record.format_version == GOSHUIN_FILE_VERSION_V3) {
+        if(app->working_record.format_version == GOSHUIN_FILE_VERSION_V4) {
+            const GoshuinStampPayloadV4* stamp = &app->working_record.payload.themed;
+            snprintf(
+                app->saved_labels[valid],
+                GOSHUIN_LABEL_CAPACITY,
+                "%s %02u-%02u %02u:%02u %s",
+                goshuin_theme_name((GoshuinThemeId)stamp->theme_id),
+                stamp->month,
+                stamp->day,
+                stamp->hour,
+                stamp->minute,
+                stamp->location);
+        } else if(app->working_record.format_version == GOSHUIN_FILE_VERSION_V3) {
             const GoshuinStampPayloadV3* stamp = &app->working_record.payload.multiband;
             snprintf(
                 app->saved_labels[valid],
@@ -1103,7 +1218,7 @@ static void main_menu_callback(void* context, uint32_t index) {
         load_saved_menu(app);
         switch_view(app, GoshuinViewSaved);
     } else if(index == GoshuinMainAbout) {
-        display_message(app, GoshuinDisplayAbout, "Radio Goshuincho Phase C", GoshuinReturnMain);
+        display_message(app, GoshuinDisplayAbout, "Radio Goshuincho Phase D", GoshuinReturnMain);
     }
 }
 
@@ -1125,6 +1240,7 @@ static RadioGoshuinchoApp* app_alloc(void) {
     app->view_dispatcher = view_dispatcher_alloc();
     app->main_menu = submenu_alloc();
     app->saved_menu = submenu_alloc();
+    app->theme_menu = submenu_alloc();
     app->text_input = text_input_alloc();
     app->display_view = view_alloc();
     app->measure_view = view_alloc();
@@ -1158,6 +1274,8 @@ static RadioGoshuinchoApp* app_alloc(void) {
     view_dispatcher_add_view(app->view_dispatcher, GoshuinViewMeasure, app->measure_view);
     view_dispatcher_add_view(
         app->view_dispatcher, GoshuinViewMultiMeasure, app->multi_measure_view);
+    view_dispatcher_add_view(
+        app->view_dispatcher, GoshuinViewTheme, submenu_get_view(app->theme_menu));
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, custom_event);
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, navigation);
@@ -1174,10 +1292,12 @@ static void app_free(RadioGoshuinchoApp* app) {
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewDisplay);
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewMeasure);
     view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewMultiMeasure);
+    view_dispatcher_remove_view(app->view_dispatcher, GoshuinViewTheme);
     view_free(app->multi_measure_view);
     view_free(app->measure_view);
     view_free(app->display_view);
     text_input_free(app->text_input);
+    submenu_free(app->theme_menu);
     submenu_free(app->saved_menu);
     submenu_free(app->main_menu);
     view_dispatcher_free(app->view_dispatcher);

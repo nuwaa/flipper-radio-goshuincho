@@ -1,9 +1,23 @@
 #include "goshuin_multiband.h"
 #include "goshuin_stamp.h"
+#include "goshuin_themed.h"
+#include "goshuin_themes.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+
+static size_t pixel_count(const uint8_t* seal) {
+    size_t count = 0;
+    for(size_t i = 0; i < GOSHUIN_SEAL_BYTES; ++i) {
+        uint8_t value = seal[i];
+        while(value) {
+            count += value & 1U;
+            value >>= 1U;
+        }
+    }
+    return count;
+}
 
 int main(void) {
     assert(sizeof(GoshuinStampPayloadV1) == 1085U);
@@ -31,6 +45,10 @@ int main(void) {
     GoshuinStampPayload decoded;
     assert(goshuin_stamp_decode_payload(2U, &second, sizeof(second), &decoded));
     assert(!memcmp(&second, &decoded, sizeof(second)));
+    GoshuinStampPayload old_v2_bitmap = second;
+    old_v2_bitmap.seal[123] ^= 0x5AU;
+    assert(goshuin_stamp_decode_payload(2U, &old_v2_bitmap, sizeof(old_v2_bitmap), &decoded));
+    assert(!memcmp(old_v2_bitmap.seal, decoded.seal, sizeof(decoded.seal)));
     second.planned_sample_count = second.sample_count - 1U;
     assert(!goshuin_stamp_decode_payload(2U, &second, sizeof(second), &decoded));
 
@@ -133,6 +151,85 @@ int main(void) {
     invalid.seal[10] ^= 1U;
     assert(!goshuin_multiband_decode(&invalid, sizeof(invalid), &multi_decoded));
     assert(goshuin_crc32(&multi, sizeof(multi)) != goshuin_crc32(&invalid, sizeof(invalid)));
+
+    assert(sizeof(GoshuinStampPayloadV4) == 1248U);
+    GoshuinStampPayloadV4 themed[6];
+    const GoshuinThemeId selectable[6] = {
+        GoshuinThemeCombined,
+        GoshuinTheme315,
+        GoshuinTheme426,
+        GoshuinTheme429,
+        GoshuinTheme433,
+        GoshuinTheme920,
+    };
+    for(size_t i = 0; i < 6U; ++i) {
+        assert(goshuin_themed_create(&themed[i], &multi, selectable[i]));
+        GoshuinStampPayloadV4 decoded_v4;
+        assert(goshuin_themed_decode(&themed[i], sizeof(themed[i]), &decoded_v4));
+        assert(!memcmp(&themed[i], &decoded_v4, sizeof(decoded_v4)));
+        assert(pixel_count(themed[i].seal) > 100U);
+        assert(pixel_count(themed[i].seal) < 3000U);
+        for(size_t previous = 0; previous < i; ++previous) {
+            assert(memcmp(themed[previous].seal, themed[i].seal, GOSHUIN_SEAL_BYTES));
+        }
+    }
+    GoshuinStampPayloadV4 repeat;
+    assert(goshuin_themed_create(&repeat, &multi, GoshuinThemeCombined));
+    assert(!memcmp(&repeat, &themed[0], sizeof(repeat)));
+    GoshuinStampPayloadV4 changed_combined;
+    assert(goshuin_themed_create(&changed_combined, &changed, GoshuinThemeCombined));
+    assert(memcmp(changed_combined.seal, themed[0].seal, GOSHUIN_SEAL_BYTES));
+    GoshuinStampPayloadV4 changed_429;
+    assert(goshuin_themed_create(&changed_429, &changed, GoshuinTheme429));
+    assert(memcmp(changed_429.seal, themed[3].seal, GOSHUIN_SEAL_BYTES));
+    GoshuinStampPayloadV4 unchanged_315;
+    assert(goshuin_themed_create(&unchanged_315, &changed, GoshuinTheme315));
+    assert(!memcmp(unchanged_315.seal, themed[1].seal, GOSHUIN_SEAL_BYTES));
+    repeat.theme_id = GoshuinThemeDemo;
+    assert(!goshuin_themed_decode(&repeat, sizeof(repeat), &repeat));
+    repeat = themed[2];
+    repeat.seal[500] ^= 1U;
+    assert(!goshuin_themed_decode(&repeat, sizeof(repeat), &repeat));
+    repeat = themed[2];
+    repeat.bands[1].rssi_average++;
+    assert(!goshuin_themed_decode(&repeat, sizeof(repeat), &repeat));
+    repeat = themed[2];
+    repeat.reserved1[1] = 1U;
+    assert(!goshuin_themed_decode(&repeat, sizeof(repeat), &repeat));
+    assert(!goshuin_themed_decode(&themed[2], sizeof(themed[2]) - 1U, &repeat));
+
+    const int8_t patterns[4][GOSHUIN_MULTIBAND_SAMPLES] = {
+        {-112, -112, -111, -112, -112, -111, -112, -112, -111, -112, -112, -111, -112, -112, -111, -112},
+        {-43, -42, -43, -42, -43, -42, -43, -42, -43, -42, -43, -42, -43, -42, -43, -42},
+        {-105, -104, -70, -105, -104, -65, -106, -105, -72, -104, -103, -60, -105, -106, -68, -104},
+        {-112, -54, -101, -46, -115, -63, -94, -40, -109, -58, -99, -49, -114, -67, -90, -43},
+    };
+    for(size_t pattern = 0; pattern < 4U; ++pattern) {
+        GoshuinThemeBandInput input = {
+            .samples = patterns[pattern],
+            .sample_count = GOSHUIN_MULTIBAND_SAMPLES,
+        };
+        uint8_t seal_a[GOSHUIN_SEAL_BYTES];
+        uint8_t seal_b[GOSHUIN_SEAL_BYTES];
+        for(GoshuinThemeId theme = GoshuinThemeDemo; theme <= GoshuinTheme920; ++theme) {
+            if(theme == GoshuinThemeCombined) continue;
+            assert(goshuin_theme_render(theme, &input, 1U, 0x12345678U, seal_a));
+            assert(goshuin_theme_render(theme, &input, 1U, 0x12345678U, seal_b));
+            assert(!memcmp(seal_a, seal_b, sizeof(seal_a)));
+        }
+    }
+    GoshuinThemeBandInput weak_input = {
+        .samples = patterns[0], .sample_count = GOSHUIN_MULTIBAND_SAMPLES};
+    GoshuinThemeBandInput strong_input = {
+        .samples = patterns[1], .sample_count = GOSHUIN_MULTIBAND_SAMPLES};
+    for(GoshuinThemeId theme = GoshuinThemeDemo; theme <= GoshuinTheme920; ++theme) {
+        if(theme == GoshuinThemeCombined) continue;
+        uint8_t weak_seal[GOSHUIN_SEAL_BYTES];
+        uint8_t strong_seal[GOSHUIN_SEAL_BYTES];
+        assert(goshuin_theme_render(theme, &weak_input, 1U, 0xCAFEU, weak_seal));
+        assert(goshuin_theme_render(theme, &strong_input, 1U, 0xCAFEU, strong_seal));
+        assert(memcmp(weak_seal, strong_seal, sizeof(weak_seal)));
+    }
     puts("stamp host tests: OK");
     return 0;
 }

@@ -1,0 +1,72 @@
+#include "goshuin_themes.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static uint8_t reverse_bits(uint8_t value) {
+    value = (uint8_t)(((value & 0x55U) << 1U) | ((value >> 1U) & 0x55U));
+    value = (uint8_t)(((value & 0x33U) << 2U) | ((value >> 2U) & 0x33U));
+    return (uint8_t)((value << 4U) | (value >> 4U));
+}
+
+static int write_pbm(const char* directory, const char* name, const uint8_t* seal) {
+    char path[256];
+    if(snprintf(path, sizeof(path), "%s/%s.pbm", directory, name) >= (int)sizeof(path)) return 1;
+    FILE* file = fopen(path, "wb");
+    if(!file) return 1;
+    if(fprintf(file, "P4\n128 64\n") < 0) {
+        fclose(file);
+        return 1;
+    }
+    for(size_t i = 0; i < GOSHUIN_SEAL_BYTES; ++i) {
+        if(fputc(reverse_bits(seal[i]), file) == EOF) {
+            fclose(file);
+            return 1;
+        }
+    }
+    return fclose(file) != 0;
+}
+
+int main(int argc, char** argv) {
+    if(argc != 2) return 2;
+    static const int8_t samples[5][16] = {
+        {-112, -112, -111, -112, -111, -112, -112, -111, -112, -112, -111, -112, -111, -112, -112, -111},
+        {-44, -43, -44, -43, -44, -43, -44, -43, -44, -43, -44, -43, -44, -43, -44, -43},
+        {-106, -105, -67, -106, -104, -60, -107, -105, -72, -105, -104, -57, -106, -105, -65, -104},
+        {-113, -52, -101, -45, -116, -64, -93, -39, -110, -57, -98, -48, -114, -66, -89, -42},
+        {-108, -105, -103, -100, -96, -92, -88, -84, -80, -77, -74, -70, -67, -64, -61, -58},
+    };
+    GoshuinThemeBandInput bands[5];
+    for(size_t i = 0; i < 5U; ++i) {
+        bands[i].samples = samples[i];
+        bands[i].sample_count = 16U;
+    }
+    static const struct {
+        GoshuinThemeId theme;
+        size_t band;
+        const char* name;
+    } previews[] = {
+        {GoshuinThemeDemo, 2U, "demo"},
+        {GoshuinTheme315, 0U, "315mhz"},
+        {GoshuinTheme426, 1U, "426mhz"},
+        {GoshuinTheme429, 2U, "429mhz"},
+        {GoshuinTheme433, 3U, "433mhz"},
+        {GoshuinTheme920, 4U, "920mhz"},
+    };
+    uint8_t seal[GOSHUIN_SEAL_BYTES];
+    for(size_t i = 0; i < sizeof(previews) / sizeof(previews[0]); ++i) {
+        if(!goshuin_theme_render(
+               previews[i].theme, &bands[previews[i].band], 1U, 0x4D475330U + i, seal) ||
+           write_pbm(argv[1], previews[i].name, seal)) {
+            return 1;
+        }
+    }
+    if(!goshuin_theme_render(
+           GoshuinThemeCombined, bands, 5U, 0x4D475335U, seal) ||
+       write_pbm(argv[1], "5bands", seal)) {
+        return 1;
+    }
+    return 0;
+}
+
