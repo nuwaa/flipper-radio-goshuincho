@@ -1,15 +1,23 @@
-# `.rgs` save format (version 1)
+# `.rgs` save format
 
-All integer fields are little-endian. The file begins with a packed 16-byte envelope:
+All integers are little-endian. Every file starts with a packed 16-byte envelope:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | magic | 4 bytes | ASCII `RGSF` |
-| format_version | `uint16_t` | Currently `1` |
-| header_size | `uint16_t` | Envelope size; currently `16` |
-| payload_size | `uint32_t` | Number of payload bytes |
-| payload_crc32 | `uint32_t` | IEEE CRC32 of the payload |
+| format_version | `uint16_t` | `1` (Phase A) or `2` (Phase B) |
+| header_size | `uint16_t` | Currently `16` |
+| payload_size | `uint32_t` | Exact payload byte count |
+| payload_crc32 | `uint32_t` | IEEE CRC32 of payload |
 
-The version 1 payload stores the RTC date/time, measurement source, sample count, sixteen signed RSSI samples, min/max/average RSSI, deterministic seed, a fixed-size ASCII place field, reserved bytes, and the 1024-byte 128×64 monochrome bitmap.
+Readers validate magic, known version, exact size, CRC32, sample bounds, source, and status. Unknown or malformed records are rejected.
 
-Readers must reject unknown versions they cannot parse and validate lengths and CRC before displaying a record. Future versions may add new measurement sources or payload fields while retaining the envelope.
+## Version 1 compatibility
+
+The 1,085-byte Phase A payload stays frozen: RTC date/time, source, sample count, 16 signed RSSI samples, min/max/average, seed, 25-byte ASCII place, reserved bytes, and a 1,024-byte seal. It is converted in memory and never rewritten automatically.
+
+## Version 2
+
+The packed 1,127-byte payload stores RTC date/time; source (`0` Demo, `1` Real RF); measurement status; valid/planned sample counts; interval in ms; frequency in Hz (zero for Demo); signed min/max/average; deterministic seed; 25-byte NUL-terminated place; 50 signed RSSI slots; and the 1,024-byte 128×64 seal.
+
+Counts must not exceed 50. Completed saved observations use status `1`; values `0`, `2`, and `3` represent unknown, interrupted, and failed for forward use. The seed hashes place, timestamp, source, frequency, valid count, and all valid samples. Saving the bitmap preserves exact display if a future generator changes.

@@ -1,0 +1,60 @@
+#include "goshuin_stamp.h"
+
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    assert(sizeof(GoshuinStampPayloadV1) == 1085U);
+    assert(sizeof(GoshuinStampPayload) == 1127U);
+    const DateTime date = {
+        .year = 2026, .month = 11, .day = 12, .hour = 9, .minute = 8, .second = 7};
+    GoshuinStampPayload first;
+    GoshuinStampPayload second;
+    goshuin_stamp_create_demo(&first, "Tokyo-1", &date);
+    goshuin_stamp_create_demo(&second, "Tokyo-1", &date);
+    assert(!memcmp(&first, &second, sizeof(first)));
+    assert(first.measurement_source == GoshuinMeasurementDummy);
+    assert(first.sample_count == GOSHUIN_V1_RSSI_SAMPLE_COUNT);
+
+    int8_t flat[GOSHUIN_MAX_RSSI_SAMPLE_COUNT];
+    memset(flat, -80, sizeof(flat));
+    assert(goshuin_stamp_create_measured(
+        &first, "Flat", &date, 433920000U, 200U, flat, sizeof(flat)));
+    assert(first.rssi_min == -80 && first.rssi_max == -80 && first.rssi_average == -80);
+    flat[49] = -40;
+    assert(goshuin_stamp_create_measured(
+        &second, "Flat", &date, 433920000U, 200U, flat, sizeof(flat)));
+    assert(first.seed != second.seed);
+    assert(memcmp(first.seal, second.seal, sizeof(first.seal)));
+    GoshuinStampPayload decoded;
+    assert(goshuin_stamp_decode_payload(2U, &second, sizeof(second), &decoded));
+    assert(!memcmp(&second, &decoded, sizeof(second)));
+    second.planned_sample_count = second.sample_count - 1U;
+    assert(!goshuin_stamp_decode_payload(2U, &second, sizeof(second), &decoded));
+
+    GoshuinStampPayloadV1 old = {0};
+    old.year = 2025;
+    old.month = 1;
+    old.day = 2;
+    old.measurement_source = GoshuinMeasurementDummy;
+    old.sample_count = GOSHUIN_V1_RSSI_SAMPLE_COUNT;
+    old.rssi_min = -99;
+    old.rssi_max = -42;
+    old.rssi_average = -70;
+    old.seed = 0x12345678U;
+    memcpy(old.location, "Phase A", 8);
+    memset(old.seal, 0xA5, sizeof(old.seal));
+    assert(goshuin_stamp_decode_payload(1U, &old, sizeof(old), &first));
+    assert(first.year == old.year && first.seed == old.seed);
+    assert(first.measurement_status == GoshuinMeasurementStatusCompleted);
+    assert(!memcmp(first.seal, old.seal, sizeof(old.seal)));
+
+    old.sample_count = GOSHUIN_V1_RSSI_SAMPLE_COUNT + 1U;
+    assert(!goshuin_stamp_decode_payload(1U, &old, sizeof(old), &first));
+    assert(!goshuin_stamp_decode_payload(99U, &old, sizeof(old), &first));
+    assert(!goshuin_stamp_decode_payload(1U, &old, sizeof(old) - 1U, &first));
+    assert(goshuin_crc32("123456789", 9U) == 0xCBF43926U);
+    puts("stamp host tests: OK");
+    return 0;
+}
